@@ -1,0 +1,491 @@
+================================================================================
+DFSORT CONTROL CARD PATTERNS — JUIA RAG CORPUS
+================================================================================
+Purpose  : Annotated real-world DFSORT control card patterns with business rule
+           explanations and modern PySpark equivalents.
+Domain   : Batch payment processing, account management, transaction reporting.
+Format   : Each pattern block contains:
+             RECORD LAYOUT   — field definitions (offset, length, format)
+             CONTROL CARDS   — actual DFSORT SYSIN statements
+             BUSINESS RULE   — plain English explanation of what the logic does
+             MODERN EQUIV    — PySpark or pandas translation
+================================================================================
+
+
+================================================================================
+PATTERN 01 — Filter active accounts with non-zero balance
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  3, Format CH  : Branch code
+  Offset 13, Length  2, Format CH  : Account status  (AC=Active, CL=Closed, SU=Suspended)
+  Offset 15, Length  7, Format ZD  : Current balance in cents (signed zoned decimal)
+  Offset 22, Length  8, Format PD  : Last transaction date YYYYMMDD (packed decimal)
+  Offset 30, Length  3, Format CH  : Currency code
+  Offset 33, Length  2, Format CH  : Product type
+
+CONTROL CARDS:
+  INCLUDE COND=(13,2,CH,EQ,C'AC',AND,15,7,ZD,GT,+0)
+  SORT FIELDS=(1,9,CH,A)
+
+BUSINESS RULE:
+  Include only records where account status at offset 13 length 2 equals 'AC'
+  (Active) AND the balance at offset 15 length 7 as Zoned Decimal is greater
+  than zero. Sort the surviving records in ascending order by account number.
+  This pattern is used at the start of end-of-day account processing to isolate
+  accounts that are open and have funds available for further processing.
+
+MODERN EQUIV (PySpark):
+  df.filter((col("account_status") == "AC") & (col("balance") > 0)) \
+    .orderBy(col("account_number").asc())
+
+
+================================================================================
+PATTERN 02 — Split output by account status into separate files
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 13, Length  2, Format CH  : Account status (AC/CL/SU/DO)
+  Offset 15, Length  7, Format ZD  : Balance in cents
+  Offset 22, Length  8, Format CH  : Account open date YYYYMMDD
+
+CONTROL CARDS:
+  SORT FIELDS=(1,9,CH,A)
+  OUTFIL FNAMES=ACTIVE,
+         INCLUDE=(13,2,CH,EQ,C'AC')
+  OUTFIL FNAMES=CLOSED,
+         INCLUDE=(13,2,CH,EQ,C'CL')
+  OUTFIL FNAMES=SUSPND,
+         INCLUDE=(13,2,CH,EQ,C'SU')
+  OUTFIL FNAMES=DORMANT,
+         INCLUDE=(13,2,CH,EQ,C'DO')
+
+BUSINESS RULE:
+  Sort all account records by account number then split into four separate
+  output files based on account status. ACTIVE receives status 'AC', CLOSED
+  receives 'CL', SUSPND receives 'SU', DORMANT receives 'DO'. Each downstream
+  job step processes only the relevant status file. This is a standard fan-out
+  pattern in account lifecycle batch processing.
+
+MODERN EQUIV (PySpark):
+  sorted_df = df.orderBy("account_number")
+  sorted_df.filter(col("account_status") == "AC").write.parquet("active/")
+  sorted_df.filter(col("account_status") == "CL").write.parquet("closed/")
+  sorted_df.filter(col("account_status") == "SU").write.parquet("suspended/")
+  sorted_df.filter(col("account_status") == "DO").write.parquet("dormant/")
+
+
+================================================================================
+PATTERN 03 — Extract high-value transactions exceeding threshold
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length 16, Format CH  : Transaction reference number
+  Offset 17, Length  9, Format CH  : Originating account
+  Offset 26, Length  9, Format CH  : Beneficiary account
+  Offset 35, Length  9, Format PD  : Transaction amount in cents (packed decimal)
+  Offset 44, Length  8, Format CH  : Value date YYYYMMDD
+  Offset 52, Length  3, Format CH  : Transaction type (WIR=Wire, ACH=ACH, CHQ=Cheque)
+  Offset 55, Length  2, Format CH  : Status (PE=Pending, CM=Complete, RJ=Rejected)
+  Offset 57, Length  4, Format CH  : Reason code
+
+CONTROL CARDS:
+  INCLUDE COND=(35,9,PD,GT,+1000000,AND,52,3,CH,EQ,C'WIR',AND,55,2,CH,EQ,C'PE')
+  SORT FIELDS=(35,9,PD,D,44,8,CH,A)
+
+BUSINESS RULE:
+  Extract all wire transfer transactions (type='WIR') that are still pending
+  (status='PE') and have an amount greater than 1,000,000 cents ($10,000.00).
+  Sort results by amount descending so the largest pending wires appear first,
+  then by value date ascending as a tiebreaker. This feeds a manual review
+  queue for high-value wire authorization.
+
+MODERN EQUIV (PySpark):
+  df.filter(
+      (col("amount") > 1000000) &
+      (col("txn_type") == "WIR") &
+      (col("status") == "PE")
+  ).orderBy(col("amount").desc(), col("value_date").asc())
+
+
+================================================================================
+PATTERN 04 — Date range extraction for settlement window
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length 16, Format CH  : Transaction reference
+  Offset 17, Length  8, Format CH  : Settlement date YYYYMMDD
+  Offset 25, Length  9, Format PD  : Amount in cents
+  Offset 34, Length  3, Format CH  : Currency
+  Offset 37, Length  3, Format CH  : Transaction type
+
+CONTROL CARDS:
+  INCLUDE COND=(17,8,CH,GE,C'20240101',AND,17,8,CH,LE,C'20240131')
+  SORT FIELDS=(17,8,CH,A,1,16,CH,A)
+
+BUSINESS RULE:
+  Extract all transactions with a settlement date falling within January 2024
+  (20240101 through 20240131 inclusive). The date field at offset 17 length 8
+  is stored as a character string in YYYYMMDD format, so character comparison
+  is valid and produces correct chronological ordering. Sort by settlement date
+  ascending, then by transaction reference as a tiebreaker. This is the
+  standard month-end settlement extract pattern.
+
+MODERN EQUIV (PySpark):
+  df.filter(
+      (col("settlement_date") >= "20240101") &
+      (col("settlement_date") <= "20240131")
+  ).orderBy("settlement_date", "txn_ref")
+
+
+================================================================================
+PATTERN 05 — Aggregate total debits and credits by account
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  8, Format CH  : Transaction date YYYYMMDD
+  Offset 18, Length  9, Format PD  : Debit amount in cents
+  Offset 27, Length  9, Format PD  : Credit amount in cents
+  Offset 36, Length  1, Format CH  : Entry type (D=Debit, C=Credit)
+
+CONTROL CARDS:
+  SORT FIELDS=(1,9,CH,A)
+  SUM FIELDS=(18,9,PD,27,9,PD)
+
+BUSINESS RULE:
+  Sort all transaction records by account number, then for each group of
+  records sharing the same account number, add together all debit amounts
+  and all credit amounts. The result is one summary record per account
+  containing the total debits and total credits across all transactions for
+  that account. This is the standard daily position calculation step.
+
+MODERN EQUIV (PySpark):
+  df.groupBy("account_number") \
+    .agg(
+        spark_sum("debit_amount").alias("total_debits"),
+        spark_sum("credit_amount").alias("total_credits")
+    )
+
+
+================================================================================
+PATTERN 06 — Reformat output record — remove internal fields, reorder columns
+================================================================================
+
+RECORD LAYOUT (INPUT):
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  8, Format CH  : Processing date
+  Offset 18, Length  4, Format CH  : Internal control code   (NOT for output)
+  Offset 22, Length  3, Format CH  : Internal batch ID       (NOT for output)
+  Offset 25, Length  7, Format ZD  : Balance
+  Offset 32, Length  2, Format CH  : Status
+  Offset 34, Length 30, Format CH  : Account holder name
+  Offset 64, Length  3, Format CH  : Branch code
+
+CONTROL CARDS:
+  OUTREC FIELDS=(1,9,        /* Account number                              */
+                 34,30,      /* Account holder name                         */
+                 64,3,       /* Branch code                                 */
+                 32,2,       /* Status                                      */
+                 25,7,ZD,TO=FS,LENGTH=9, /* Balance: ZD to fixed signed     */
+                 10,8)       /* Processing date last                        */
+
+BUSINESS RULE:
+  Rebuild the output record by selecting only the fields required downstream.
+  Internal control code (offset 18) and batch ID (offset 22) are dropped from
+  the output. Field order is changed: account number, name, branch, status,
+  balance (converted from Zoned Decimal to Fixed Signed 9-byte), then date.
+  This is a standard extract-to-downstream-system reformatting step where
+  internal processing fields must be stripped before the file leaves the
+  batch environment.
+
+MODERN EQUIV (PySpark):
+  df.select(
+      col("account_number"),
+      col("account_holder_name"),
+      col("branch_code"),
+      col("status"),
+      col("balance").cast("long"),
+      col("processing_date")
+  )
+
+
+================================================================================
+PATTERN 07 — INREC: reformat before sort, convert packed decimal date
+================================================================================
+
+RECORD LAYOUT (INPUT):
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  4, Format PD  : Transaction date as packed decimal YYYYMMDD
+  Offset 14, Length  9, Format PD  : Amount in cents
+  Offset 23, Length  2, Format CH  : Transaction type
+  Offset 25, Length 75, Format CH  : Remaining fields
+
+CONTROL CARDS:
+  INREC FIELDS=(1,9,          /* Account number unchanged                   */
+                10,4,PD,TO=CH,LENGTH=8, /* PD date → 8-byte char YYYYMMDD  */
+                18,9,         /* Amount (now at new offset after conversion) */
+                27,2,         /* Transaction type                            */
+                29,75)        /* Remaining fields                            */
+  SORT FIELDS=(1,9,CH,A,10,8,CH,A)
+
+BUSINESS RULE:
+  Before sorting, convert the packed decimal date field at offset 10 to an
+  8-character YYYYMMDD string. This is necessary because sorting packed decimal
+  date fields directly requires PD format in the SORT statement, but downstream
+  programs expect a character date. Converting in INREC allows the SORT to use
+  simple character comparison on the date, and the output record already has the
+  converted format ready for the next step.
+
+MODERN EQUIV (PySpark):
+  from pyspark.sql.functions import lpad
+  df.withColumn("txn_date_str",
+      lpad(col("txn_date_packed").cast("string"), 8, "0")
+  ).orderBy("account_number", "txn_date_str")
+
+
+================================================================================
+PATTERN 08 — OUTFIL with per-file INCLUDE and OUTREC for dual-purpose extract
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  9, Format PD  : Transaction amount
+  Offset 19, Length  2, Format CH  : Status
+  Offset 21, Length  8, Format CH  : Value date
+  Offset 29, Length  3, Format CH  : Channel (ONL=Online, BRN=Branch, API=API)
+  Offset 32, Length 68, Format CH  : Remaining
+
+CONTROL CARDS:
+  SORT FIELDS=(1,9,CH,A,21,8,CH,A)
+  OUTFIL FNAMES=FULLREC,
+         INCLUDE=(19,2,CH,EQ,C'CM')
+  OUTFIL FNAMES=SUMMARY,
+         INCLUDE=(19,2,CH,EQ,C'CM'),
+         OUTREC FIELDS=(1,9,10,9,PD,TO=FS,LENGTH=11,21,8)
+
+BUSINESS RULE:
+  From the sorted input, produce two output files in a single pass. FULLREC
+  receives all completed transactions (status='CM') with every field intact.
+  SUMMARY receives the same completed transactions but reformatted to only
+  three fields: account number, amount (converted from packed decimal to fixed
+  signed 11 bytes), and value date. The summary file feeds a lightweight
+  downstream reporting step that does not need all fields. Processing in a
+  single pass avoids reading the input dataset twice.
+
+MODERN EQUIV (PySpark):
+  completed = df.filter(col("status") == "CM") \
+                .orderBy("account_number", "value_date")
+  completed.write.parquet("fullrec/")
+  completed.select("account_number", "amount", "value_date") \
+           .write.parquet("summary/")
+
+
+================================================================================
+PATTERN 09 — ICETOOL SELECT: extract top N records by amount
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length 16, Format CH  : Transaction reference
+  Offset 17, Length  9, Format PD  : Amount in cents
+  Offset 26, Length  8, Format CH  : Transaction date YYYYMMDD
+  Offset 34, Length  2, Format CH  : Status
+  Offset 36, Length  3, Format CH  : Transaction type
+
+ICETOOL CONTROL CARDS:
+  SORT FROM(INFILE) TO(SORTED) USING(SRTCNTL)
+
+  SRTCNTL SYSIN:
+    SORT FIELDS=(17,9,PD,D)
+
+  ICETOOL TOOLIN:
+    SELECT FROM(SORTED) TO(TOP100) ON(17,9,PD) FIRST(100)
+
+BUSINESS RULE:
+  Sort all transaction records by amount descending, then select only the top
+  100 records by amount. The SELECT operator with FIRST(100) keeps exactly the
+  first 100 records from the sorted input. This pattern produces the daily
+  top-100 highest value transactions report. The two-step approach (SORT then
+  SELECT) is the standard ICETOOL pattern for ranked extracts.
+
+MODERN EQUIV (PySpark):
+  df.orderBy(col("amount").desc()).limit(100)
+
+
+================================================================================
+PATTERN 10 — ICETOOL STATS: generate statistics on amount field
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  9, Format PD  : Transaction amount in cents
+  Offset 19, Length  8, Format CH  : Transaction date
+  Offset 27, Length  2, Format CH  : Transaction type
+
+ICETOOL TOOLIN:
+  STATS FROM(INFILE) ON(10,9,PD)
+
+BUSINESS RULE:
+  Calculate MIN, MAX, SUM, and COUNT statistics on the packed decimal amount
+  field at offset 10 length 9. STATS writes its results to TOOLMSG. This is
+  used as a control total verification step after loading a transaction file:
+  the output COUNT and SUM are compared against the trailer record of the
+  source file to confirm all records were loaded and amounts balance.
+
+MODERN EQUIV (PySpark):
+  df.agg(
+      count("amount").alias("record_count"),
+      spark_sum("amount").alias("total_amount"),
+      min("amount").alias("min_amount"),
+      max("amount").alias("max_amount")
+  )
+
+
+================================================================================
+PATTERN 11 — JOINKEYS: enrich transactions with account master data
+================================================================================
+
+FILE 1 (F1) RECORD LAYOUT — Transaction file:
+  Offset  1, Length  9, Format CH  : Account number (join key)
+  Offset 10, Length 16, Format CH  : Transaction reference
+  Offset 26, Length  9, Format PD  : Amount
+  Offset 35, Length  8, Format CH  : Value date
+
+FILE 2 (F2) RECORD LAYOUT — Account master file:
+  Offset  1, Length  9, Format CH  : Account number (join key)
+  Offset 10, Length  2, Format CH  : Account status
+  Offset 12, Length  3, Format CH  : Product type
+  Offset 15, Length 30, Format CH  : Account holder name
+
+CONTROL CARDS:
+  JOINKEYS FILES=F1,FIELDS=(1,9,CH,A)
+  JOINKEYS FILES=F2,FIELDS=(1,9,CH,A)
+  JOIN UNPAIRED,F1
+  REFORMAT FIELDS=(F1:1,43,F2:10,35)
+  SORT FIELDS=COPY
+
+BUSINESS RULE:
+  Join every transaction record (F1) to its corresponding account master
+  record (F2) using account number as the join key. JOIN UNPAIRED,F1 ensures
+  transactions with no matching account master are still included in the output
+  (with F2 fields blank) rather than being silently dropped. The REFORMAT
+  statement builds the output record from all 43 bytes of the transaction record
+  followed by 35 bytes of account attributes from the master. This enrichment
+  step is required before the downstream risk scoring step which needs both
+  transaction details and account classification in a single record.
+
+MODERN EQUIV (PySpark):
+  transactions.join(
+      account_master,
+      on="account_number",
+      how="left"
+  )
+
+
+================================================================================
+PATTERN 12 — OMIT: exclude rejected and test transactions
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length 16, Format CH  : Transaction reference
+  Offset 17, Length  2, Format CH  : Status (RJ=Rejected, TS=Test, PE=Pending, CM=Complete)
+  Offset 19, Length  1, Format CH  : Test flag (Y=Test transaction, N=Live)
+  Offset 20, Length  9, Format PD  : Amount
+  Offset 29, Length  8, Format CH  : Date
+
+CONTROL CARDS:
+  OMIT COND=(17,2,CH,EQ,C'RJ',OR,19,1,CH,EQ,C'Y')
+  SORT FIELDS=(29,8,CH,A,20,9,PD,D)
+
+BUSINESS RULE:
+  Exclude any record where status equals 'RJ' (Rejected) OR the test flag
+  equals 'Y'. All remaining records (live, non-rejected transactions) are
+  sorted by date ascending and amount descending. OMIT is used here instead
+  of INCLUDE because expressing the exclusion condition is simpler than
+  expressing the inclusion condition when multiple reject reasons exist.
+  This is standard pre-processing before the end-of-day settlement run.
+
+MODERN EQUIV (PySpark):
+  df.filter(
+      (col("status") != "RJ") & (col("test_flag") != "Y")
+  ).orderBy(col("date").asc(), col("amount").desc())
+
+
+================================================================================
+PATTERN 13 — OUTFIL OUTREC with constant insertion and field padding
+================================================================================
+
+RECORD LAYOUT (INPUT):
+  Offset  1, Length  9, Format CH  : Account number
+  Offset 10, Length  9, Format PD  : Amount in cents
+  Offset 19, Length  8, Format CH  : Date YYYYMMDD
+  Offset 27, Length  2, Format CH  : Status
+
+CONTROL CARDS:
+  SORT FIELDS=COPY
+  OUTFIL FNAMES=OUTFILE,
+         OUTREC FIELDS=(C'PAYMENT',   /* 7-byte literal record type tag      */
+                        1,9,           /* Account number                      */
+                        10,9,PD,TO=FS,LENGTH=12, /* Amount to fixed signed   */
+                        19,8,          /* Date                                */
+                        27,2,          /* Status                              */
+                        7X)            /* 7 bytes of hex zeros as filler      */
+
+BUSINESS RULE:
+  Reformat each record to match the fixed-length interface layout required by
+  the downstream payment posting system. A 7-byte literal 'PAYMENT' is inserted
+  at the start of every record as a record type identifier. The packed decimal
+  amount is converted to a 12-byte fixed signed field. Seven bytes of binary
+  zeros are appended at the end to pad the record to the required total length.
+  This is a common interface file creation pattern where the consuming system
+  requires a specific fixed layout with record type tags.
+
+MODERN EQUIV (PySpark):
+  from pyspark.sql.functions import lit, lpad
+  df.select(
+      lit("PAYMENT").alias("record_type"),
+      col("account_number"),
+      col("amount").cast("long"),
+      col("date"),
+      col("status"),
+      lit("0000000").alias("filler")
+  )
+
+
+================================================================================
+PATTERN 14 — Multi-key sort for duplicate detection preparation
+================================================================================
+
+RECORD LAYOUT:
+  Offset  1, Length 16, Format CH  : Transaction reference
+  Offset 17, Length  9, Format CH  : Originating account
+  Offset 26, Length  9, Format PD  : Amount in cents
+  Offset 35, Length  8, Format CH  : Value date YYYYMMDD
+  Offset 43, Length  3, Format CH  : Channel code
+  Offset 46, Length 54, Format CH  : Remaining fields
+
+CONTROL CARDS:
+  SORT FIELDS=(17,9,CH,A,35,8,CH,A,26,9,PD,D,1,16,CH,A)
+  SUM FIELDS=NONE,XSUM=OUTFIL
+  OUTFIL FNAMES=DUPS,REMOVECC
+
+BUSINESS RULE:
+  Sort by account number, value date, amount descending, and transaction
+  reference. SUM FIELDS=NONE with XSUM=OUTFIL routes duplicate records — those
+  sharing identical account number, date, and amount — to the DUPS output file
+  while retaining only one copy in the main output. This is the DFSORT approach
+  to duplicate transaction detection. The DUPS file is reviewed as part of the
+  daily reconciliation process to identify potential double-posting incidents.
+
+MODERN EQUIV (PySpark):
+  from pyspark.sql.functions import count
+  window = Window.partitionBy("account_number", "value_date", "amount")
+  df.withColumn("occurrence_count", count("*").over(window)) \
+    .filter(col("occurrence_count") > 1)
+
+
+================================================================================
+END OF DFSORT PATTERNS FILE
+================================================================================

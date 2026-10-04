@@ -1,0 +1,419 @@
+================================================================================
+IEBGENER CONTROL STATEMENT PATTERNS — JUIA RAG CORPUS
+================================================================================
+Purpose  : Annotated real-world IEBGENER usage patterns with business rule
+           explanations and modern equivalents.
+Domain   : Batch payment processing, file copy, backup, interface file
+           creation, format conversion.
+Format   : Each pattern block contains:
+             DATASETS        — names and types of files involved
+             JCL + SYSIN     — complete step including DD statements and
+                               IEBGENER control statements (if used)
+             BUSINESS RULE   — plain English explanation of what the step does
+             MODERN EQUIV    — Python or shell equivalent
+================================================================================
+
+
+================================================================================
+PATTERN 01 — Simple copy: no SYSIN, no control statements
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.TODAY.SEQ    (PS, FB, LRECL=200)
+  Output : BATCH.PAYMENT.BACKUP.SEQ   (PS, FB, LRECL=200)
+
+JCL:
+  //COPY01   EXEC PGM=IEBGENER
+  //SYSPRINT DD SYSOUT=*
+  //SYSIN    DD DUMMY
+  //SYSUT1   DD DSN=BATCH.PAYMENT.TODAY.SEQ,DISP=SHR
+  //SYSUT2   DD DSN=BATCH.PAYMENT.BACKUP.SEQ,
+  //            DISP=(NEW,CATLG,DELETE),
+  //            SPACE=(CYL,(10,5)),
+  //            RECFM=FB,LRECL=200
+
+BUSINESS RULE:
+  Make an exact copy of the daily payment file before any processing begins.
+  SYSIN DD DUMMY means no control statements are provided — IEBGENER performs
+  a straight record-by-record copy. This creates a pre-processing backup that
+  can be used to restart the batch run from the beginning if any downstream
+  step fails. The backup is created as a new catalogued dataset. This is the
+  most common IEBGENER usage in production: a one-line backup step at the
+  start of every batch job that touches critical data.
+
+MODERN EQUIV (Python):
+  import shutil
+  shutil.copy2("payment_today.dat", "payment_backup.dat")
+
+MODERN EQUIV (Shell):
+  cp BATCH.PAYMENT.TODAY.SEQ BATCH.PAYMENT.BACKUP.SEQ
+
+
+================================================================================
+PATTERN 02 — Reblock: copy with different block size for tape output
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.DISK.SEQ   (PS, FB, LRECL=200, BLKSIZE=4000)
+  Output : BATCH.PAYMENT.TAPE.SEQ   (PS, FB, LRECL=200, BLKSIZE=32000)
+
+JCL:
+  //REBLOCK  EXEC PGM=IEBGENER
+  //SYSPRINT DD SYSOUT=*
+  //SYSIN    DD DUMMY
+  //SYSUT1   DD DSN=BATCH.PAYMENT.DISK.SEQ,DISP=SHR
+  //SYSUT2   DD DSN=BATCH.PAYMENT.TAPE.SEQ,
+  //            DISP=(NEW,CATLG,DELETE),
+  //            UNIT=TAPE,
+  //            RECFM=FB,LRECL=200,BLKSIZE=32000
+
+BUSINESS RULE:
+  Copy the payment file from disk to tape, changing the block size from 4000
+  to 32000 bytes in the process. The logical record length remains 200 bytes
+  and the data is unchanged. Larger block sizes on tape improve write and read
+  performance significantly. IEBGENER handles the reblocking transparently —
+  the SYSUT2 DCB overrides the block size. This step produces the daily tape
+  archive sent to the off-site vault.
+
+MODERN EQUIV:
+  # Block size is a physical media concept — no direct equivalent
+  # Modern equivalent is writing to compressed archive
+  import gzip, shutil
+  with open("payment_disk.dat", "rb") as f_in:
+      with gzip.open("payment_tape.dat.gz", "wb") as f_out:
+          shutil.copyfileobj(f_in, f_out)
+
+
+================================================================================
+PATTERN 03 — GENERATE/RECORD: extract and reformat selected fields
+================================================================================
+
+DATASETS:
+  Input  : BATCH.ACCOUNT.FULL.SEQ    (PS, FB, LRECL=300)
+  Output : BATCH.ACCOUNT.EXTRACT.SEQ (PS, FB, LRECL=100)
+
+INPUT RECORD LAYOUT:
+  Offset  1, Length  9 : Account number
+  Offset 10, Length  2 : Status
+  Offset 12, Length 30 : Account holder name
+  Offset 42, Length  8 : Open date YYYYMMDD
+  Offset 50, Length  7 : Balance
+  Offset 57, Length  3 : Branch code
+  Offset 60, Length  3 : Currency
+  Offset 63, Length  2 : Product type
+  Offset 65, Length 236: Remaining fields (NOT required in output)
+
+JCL:
+  //EXTRACT  EXEC PGM=IEBGENER
+  //SYSPRINT DD SYSOUT=*
+  //SYSUT1   DD DSN=BATCH.ACCOUNT.FULL.SEQ,DISP=SHR
+  //SYSUT2   DD DSN=BATCH.ACCOUNT.EXTRACT.SEQ,
+  //            DISP=(NEW,CATLG,DELETE),
+  //            SPACE=(CYL,(5,2)),
+  //            RECFM=FB,LRECL=100
+  //SYSIN    DD *
+    GENERATE MAXFLDS=8
+    RECORD   FIELD=(9,1,,1),        /* Account number     offset 1  len 9  */
+             FIELD=(2,10,,10),      /* Status             offset 10 len 2  */
+             FIELD=(30,12,,12),     /* Name               offset 12 len 30 */
+             FIELD=(8,42,,42),      /* Open date          offset 42 len 8  */
+             FIELD=(7,50,,50),      /* Balance            offset 50 len 7  */
+             FIELD=(3,57,,57),      /* Branch code        offset 57 len 3  */
+             FIELD=(3,60,,60),      /* Currency           offset 60 len 3  */
+             FIELD=(2,63,,63)       /* Product type       offset 63 len 2  */
+  /*
+
+BUSINESS RULE:
+  Extract 8 specific fields from the 300-byte full account record and write
+  them to a 100-byte output record, dropping the 236-byte tail which contains
+  internal system fields not required downstream. The RECORD FIELD parameter
+  format is (length, input-offset, conversion, output-offset). GENERATE
+  MAXFLDS=8 declares the number of FIELD parameters that follow. This creates
+  a lightweight extract file for delivery to the branch reporting system which
+  cannot receive the full internal record format. IEBGENER is chosen over
+  DFSORT here because no sorting is required — pure field selection and
+  reformatting only.
+
+MODERN EQUIV (Python):
+  import pandas as pd
+  cols = ["account_number","status","name","open_date",
+          "balance","branch","currency","product"]
+  df[cols].to_csv("account_extract.dat", index=False)
+
+
+================================================================================
+PATTERN 04 — Create PDS member from sequential input
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.PARAMS.SEQ  (PS — sequential parameter file)
+  Output : BATCH.PROCLIB(PAYRULES)   (PDS member)
+
+JCL:
+  //TOPDS    EXEC PGM=IEBGENER
+  //SYSPRINT DD SYSOUT=*
+  //SYSIN    DD DUMMY
+  //SYSUT1   DD DSN=BATCH.PAYMENT.PARAMS.SEQ,DISP=SHR
+  //SYSUT2   DD DSN=BATCH.PROCLIB(PAYRULES),
+  //            DISP=SHR
+
+BUSINESS RULE:
+  Copy the sequential parameter file into a PDS as a named member called
+  PAYRULES. SYSIN DD DUMMY means straight copy with no reformatting. This
+  step is used to refresh the PROCLIB member that holds business rule
+  parameters (cutoff amounts, processing flags, date windows) before the
+  main processing job reads them. The parameter file is maintained externally
+  and promoted into the PDS member as part of the daily setup job.
+
+MODERN EQUIV (Python):
+  # Copy file content to a named config location
+  import shutil
+  shutil.copy2("payment_params.conf", "proclib/PAYRULES")
+
+
+================================================================================
+PATTERN 05 — Add header and trailer records using GENERATE
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.DATA.SEQ    (PS, FB, LRECL=200)
+  Output : BATCH.PAYMENT.WRAPPED.SEQ (PS, FB, LRECL=200)
+
+JCL:
+  //WRAP     EXEC PGM=IEBGENER
+  //SYSPRINT DD SYSOUT=*
+  //SYSUT1   DD DSN=BATCH.PAYMENT.DATA.SEQ,DISP=SHR
+  //SYSUT2   DD DSN=BATCH.PAYMENT.WRAPPED.SEQ,
+  //            DISP=(NEW,CATLG,DELETE),
+  //            SPACE=(CYL,(10,5)),
+  //            RECFM=FB,LRECL=200
+  //SYSIN    DD *
+    GENERATE HEADER=YES,
+             TRAILER=YES,
+             MAXFLDS=1
+    RECORD   FIELD=(200,1,,1)
+  /*
+
+BUSINESS RULE:
+  Copy all data records from input to output, adding a generated header record
+  before the first data record and a trailer record after the last. HEADER=YES
+  causes IEBGENER to write a header record at the start of the output file.
+  TRAILER=YES adds a trailer at the end. The RECORD statement copies all 200
+  bytes of each input record unchanged. This wrapping pattern is used when
+  preparing files for external counterparties whose systems require an explicit
+  file header (record count, date, file ID) and trailer (control totals).
+  Note: the header and trailer content are blank unless populated by a user
+  exit; this pattern is often combined with an E15/E35 user exit that inserts
+  the control data.
+
+MODERN EQUIV (Python):
+  with open("payment_wrapped.dat", "w") as out:
+      out.write(build_header_record())
+      with open("payment_data.dat") as data:
+          out.write(data.read())
+      out.write(build_trailer_record(record_count, control_total))
+
+
+================================================================================
+PATTERN 06 — IEBGENER vs ICEGENER: performance-aware copy decision
+================================================================================
+
+CONTEXT:
+  ICEGENER is a DFSORT-based alternative to IEBGENER that IBM provides as a
+  drop-in replacement. When IEBGENER is invoked and no SYSIN control
+  statements are provided (SYSIN DD DUMMY), z/OS can automatically substitute
+  ICEGENER, which uses optimised block I/O and is significantly faster for
+  large files.
+
+JCL (explicit ICEGENER invocation for large files):
+  //FASTCOPY EXEC PGM=ICEGENER
+  //SYSPRINT DD SYSOUT=*
+  //SYSIN    DD DUMMY
+  //SYSUT1   DD DSN=BATCH.PAYMENT.LARGE.SEQ,DISP=SHR
+  //SYSUT2   DD DSN=BATCH.PAYMENT.LARGECOPY.SEQ,
+  //            DISP=(NEW,CATLG,DELETE),
+  //            SPACE=(CYL,(100,20)),
+  //            RECFM=FB,LRECL=200
+
+BUSINESS RULE:
+  For files larger than approximately 1 million records, use ICEGENER
+  explicitly instead of IEBGENER. ICEGENER uses the DFSORT I/O engine which
+  processes data in large blocks, activates the IBM Integrated Accelerator
+  for Z Sort where available, and can reduce elapsed time by 40-60% compared
+  to IEBGENER for straight copy operations. The JCL and behaviour are
+  identical from the job perspective — only the PGM= name changes. This
+  substitution is transparent to all downstream steps.
+
+MODERN EQUIV:
+  # No equivalent needed — all modern copy operations use buffered I/O
+  shutil.copy2("payment_large.dat", "payment_largecopy.dat")
+
+
+================================================================================
+PATTERN 07 — Copy sequential file to multiple output files (concatenation)
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.MASTER.SEQ  (PS, FB, LRECL=250)
+  Output : BATCH.PAYMENT.COPY1.SEQ   (PS, FB, LRECL=250)
+           BATCH.PAYMENT.COPY2.SEQ   (PS, FB, LRECL=250)
+
+JCL:
+  //MULTICOPY EXEC PGM=IEBGENER
+  //SYSPRINT  DD SYSOUT=*
+  //SYSIN     DD DUMMY
+  //SYSUT1    DD DSN=BATCH.PAYMENT.MASTER.SEQ,DISP=SHR
+  //SYSUT2    DD DSN=BATCH.PAYMENT.COPY1.SEQ,
+  //             DISP=(NEW,CATLG,DELETE),
+  //             SPACE=(CYL,(20,5)),RECFM=FB,LRECL=250
+  //          DD DSN=BATCH.PAYMENT.COPY2.SEQ,
+  //             DISP=(NEW,CATLG,DELETE),
+  //             SPACE=(CYL,(20,5)),RECFM=FB,LRECL=250
+
+BUSINESS RULE:
+  Write the input file to two output files simultaneously by concatenating
+  two DD statements under the SYSUT2 ddname. IEBGENER writes sequentially
+  — when COPY1 is full or closed, writing continues to COPY2. This produces
+  two identical copies of the master file in a single pass. The pattern is
+  used when two separate downstream systems each need an independent copy of
+  the same input file and the input file is too large to read twice within
+  the batch window. Note: this is a sequential continuation, not a true
+  simultaneous dual write — COPY1 fills first.
+
+MODERN EQUIV (Python):
+  import shutil
+  shutil.copy2("payment_master.dat", "payment_copy1.dat")
+  shutil.copy2("payment_master.dat", "payment_copy2.dat")
+
+
+================================================================================
+PATTERN 08 — Convert sequential file to in-stream PDS for JCL use
+================================================================================
+
+DATASETS:
+  Input  : BATCH.CONTROL.PARMS.SEQ   (PS — sequential, contains JCL-like parms)
+  Output : SYS1.PARMLIB(BATCHCTL)    (PDS system library member)
+
+JCL:
+  //TOPARMLIB EXEC PGM=IEBGENER
+  //SYSPRINT  DD SYSOUT=*
+  //SYSIN     DD DUMMY
+  //SYSUT1    DD DSN=BATCH.CONTROL.PARMS.SEQ,DISP=SHR
+  //SYSUT2    DD DSN=SYS1.PARMLIB(BATCHCTL),
+  //             DISP=SHR
+
+BUSINESS RULE:
+  Promote a sequential control parameter file into SYS1.PARMLIB as a named
+  member. This step runs at the start of the weekly parameter refresh job.
+  The parameter file is maintained by the business rules team in a sequential
+  dataset under change control. This step installs the approved parameters
+  into PARMLIB where they will be read by the batch scheduler and production
+  JCL for the next processing cycle. DISP=SHR on the output PDS allows
+  replacement of the existing member without exclusive enqueue on the entire
+  library.
+
+MODERN EQUIV (Python):
+  import shutil
+  shutil.copy2("control_parms.conf", "/etc/batch/BATCHCTL")
+
+
+================================================================================
+PATTERN 09 — Identify IEBGENER by JCL pattern (no SYSIN or SYSIN DUMMY)
+================================================================================
+
+CONTEXT:
+  When analysing JCL to decode utility steps, IEBGENER can be identified by
+  any of the following patterns:
+
+PATTERN A — SYSIN DD DUMMY (straight copy, most common):
+  //stepname EXEC PGM=IEBGENER
+  //SYSIN    DD DUMMY
+  //SYSUT1   DD DSN=source.dataset,DISP=SHR
+  //SYSUT2   DD DSN=target.dataset,...
+
+PATTERN B — No SYSIN at all (treated same as DUMMY):
+  //stepname EXEC PGM=IEBGENER
+  //SYSUT1   DD DSN=source.dataset,DISP=SHR
+  //SYSUT2   DD DSN=target.dataset,...
+
+PATTERN C — SYSIN with control statements (reformatting):
+  //stepname EXEC PGM=IEBGENER
+  //SYSIN    DD *
+    GENERATE MAXFLDS=n
+    RECORD   FIELD=(len,in-off,,out-off), ...
+  /*
+  //SYSUT1   DD DSN=source.dataset,DISP=SHR
+  //SYSUT2   DD DSN=target.dataset,...
+
+IDENTIFICATION RULE:
+  A JCL step is an IEBGENER step when PGM=IEBGENER or PGM=ICEGENER and
+  the step contains SYSUT1 (input) and SYSUT2 (output) DD statements.
+  SYSPRINT is diagnostic output — always present but carries no business logic.
+  The presence or absence of SYSIN and its content determines whether the step
+  is a straight copy (no business logic) or a reformatting step (field
+  selection logic to decode). ICEGENER with SYSIN DD DUMMY is always a
+  straight copy — ICEGENER does not support GENERATE/RECORD control statements.
+
+BUSINESS RULE EXTRACTION LOGIC:
+  If SYSIN = DUMMY or absent       → Business rule: "Straight copy of [SYSUT1]
+                                      to [SYSUT2]. No transformation applied."
+  If SYSIN contains GENERATE/RECORD → Decode each FIELD parameter:
+                                      (length, input-offset, conversion,
+                                       output-offset) and describe which input
+                                      fields are selected and how they map to
+                                      the output record layout.
+
+
+================================================================================
+PATTERN 10 — IEBGENER field conversion: FIELD parameter format reference
+================================================================================
+
+CONTEXT:
+  IEBGENER RECORD FIELD parameter format:
+    FIELD=(length, input-offset, conversion-code, output-offset)
+
+  All offsets are 1-based (first byte of record = offset 1).
+
+CONVERSION CODES:
+  (blank) : No conversion — copy bytes as-is
+  HE      : Convert character to hexadecimal representation
+  PZ      : Convert packed decimal to zoned decimal
+  ZP      : Convert zoned decimal to packed decimal
+
+FIELD PARAMETER EXAMPLES AND THEIR MEANINGS:
+
+  FIELD=(9,1,,1)
+    Copy 9 bytes from input offset 1 to output offset 1. No conversion.
+    Meaning: Copy account number field unchanged.
+
+  FIELD=(200,1,,1)
+    Copy 200 bytes from input offset 1 to output offset 1. No conversion.
+    Meaning: Copy entire record unchanged (straight copy via control statement).
+
+  FIELD=(7,50,PZ,43)
+    Take 7 bytes at input offset 50, convert from Zoned Decimal to Packed
+    Decimal, write to output offset 43.
+    Meaning: Convert balance field from display format to packed storage format
+    for downstream program that reads packed decimal.
+
+  FIELD=(4,30,ZP,30)
+    Take 4 bytes at input offset 30, convert from Packed Decimal to Zoned
+    Decimal, write to output offset 30 (same position).
+    Meaning: Convert a packed decimal date in place to character display format.
+
+  FIELD=(2,13,,10)
+    Copy 2 bytes from input offset 13 to output offset 10. No conversion.
+    Meaning: Move the status field from position 13 in input to position 10
+    in output (field reordering).
+
+BUSINESS RULE EXTRACTION NOTE:
+  To decode an IEBGENER step with RECORD statements, read each FIELD parameter
+  and map input-offset+length against the input record layout to identify which
+  business field is being moved or converted. The output-offset determines where
+  it lands in the output record. Fields absent from any FIELD parameter are not
+  included in the output — they are dropped from the interface file.
+
+
+================================================================================
+END OF IEBGENER PATTERNS FILE
+================================================================================

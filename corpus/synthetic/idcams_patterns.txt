@@ -1,0 +1,391 @@
+================================================================================
+IDCAMS CONTROL STATEMENT PATTERNS — JUIA RAG CORPUS
+================================================================================
+Purpose  : Annotated real-world IDCAMS (Access Method Services) command
+           patterns with business rule explanations and modern equivalents.
+Domain   : Batch payment processing, VSAM dataset lifecycle management,
+           account and transaction file operations.
+Format   : Each pattern block contains:
+             DATASETS        — names and types of files involved
+             IDCAMS SYSIN    — actual IDCAMS control statements
+             BUSINESS RULE   — plain English explanation of what the step does
+             MODERN EQUIV    — Python, AWS S3/Glue, or Kafka equivalent
+================================================================================
+
+
+================================================================================
+PATTERN 01 — REPRO: load sequential flat file into VSAM KSDS
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.INPUT.SEQ    (PS — sequential flat file)
+  Output : BATCH.PAYMENT.VSAM.KSDS   (VSAM KSDS — keyed sequential)
+
+JCL DD STATEMENTS:
+  //SEQIN    DD DSN=BATCH.PAYMENT.INPUT.SEQ,DISP=SHR
+  //VSAMOUT  DD DSN=BATCH.PAYMENT.VSAM.KSDS,DISP=SHR
+  //SYSIN    DD *
+
+IDCAMS SYSIN:
+  REPRO INFILE(SEQIN)     -
+        OUTFILE(VSAMOUT)
+
+BUSINESS RULE:
+  Copy all records from the sequential input file into the VSAM KSDS dataset.
+  This is the standard batch load step at the start of a payment processing
+  job. The sequential file arrives from an upstream system or file transfer.
+  IDCAMS REPRO handles the physical load; the KSDS organises records by key
+  automatically. No REPLACE parameter means duplicate keys will cause the step
+  to fail — intentional, as duplicates indicate a feed error that must be
+  investigated before processing continues.
+
+MODERN EQUIV:
+  # Load flat file records into a PostgreSQL keyed table
+  import pandas as pd
+  from sqlalchemy import create_engine
+  df = pd.read_fwf("payment_input.dat", ...)
+  df.to_sql("payment_vsam", engine, if_exists="append", index=False)
+
+
+================================================================================
+PATTERN 02 — REPRO: extract VSAM KSDS to sequential file for downstream
+================================================================================
+
+DATASETS:
+  Input  : BATCH.ACCOUNT.MASTER.KSDS  (VSAM KSDS)
+  Output : BATCH.ACCOUNT.EXTRACT.SEQ  (PS — sequential)
+
+JCL DD STATEMENTS:
+  //VSAMIN   DD DSN=BATCH.ACCOUNT.MASTER.KSDS,DISP=SHR
+  //SEQOUT   DD DSN=BATCH.ACCOUNT.EXTRACT.SEQ,
+  //            DISP=(NEW,CATLG,DELETE),
+  //            SPACE=(CYL,(10,5)),RECFM=FB,LRECL=200
+  //SYSIN    DD *
+
+IDCAMS SYSIN:
+  REPRO INFILE(VSAMIN)      -
+        OUTFILE(SEQOUT)     -
+        FROMKEY(000000001)  -
+        TOKEY(999999999)
+
+BUSINESS RULE:
+  Extract all records from the account master KSDS where the key falls between
+  000000001 and 999999999 (effectively all records) and write them to a
+  sequential flat file. FROMKEY and TOKEY parameters allow partial key range
+  extracts. Here the full range is specified to produce a complete snapshot of
+  the account master for delivery to an external reporting system that cannot
+  read VSAM directly. The sequential file is created fresh each run
+  (DISP=NEW,CATLG).
+
+MODERN EQUIV:
+  # Export from PostgreSQL to flat file
+  df = pd.read_sql("SELECT * FROM account_master ORDER BY account_key", engine)
+  df.to_csv("account_extract.dat", index=False)
+
+
+================================================================================
+PATTERN 03 — REPRO with REPLACE: reload VSAM with updated records
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.UPDATE.SEQ   (PS — sequential update file)
+  Output : BATCH.PAYMENT.VSAM.KSDS   (VSAM KSDS — existing dataset)
+
+JCL DD STATEMENTS:
+  //UPDATEIN  DD DSN=BATCH.PAYMENT.UPDATE.SEQ,DISP=SHR
+  //VSAMOUT   DD DSN=BATCH.PAYMENT.VSAM.KSDS,DISP=SHR
+  //SYSIN     DD *
+
+IDCAMS SYSIN:
+  REPRO INFILE(UPDATEIN)    -
+        OUTFILE(VSAMOUT)    -
+        REPLACE
+
+BUSINESS RULE:
+  Load update records into the existing VSAM KSDS. The REPLACE parameter
+  allows records with duplicate keys to overwrite the existing VSAM record
+  rather than causing an error. Records with keys not already in the KSDS
+  are inserted as new records. This is the standard intraday update pattern:
+  the update file contains both new transactions and corrections to previously
+  loaded records. Without REPLACE this step would abend on the first duplicate.
+
+MODERN EQUIV:
+  # PostgreSQL upsert pattern
+  df.to_sql("payment_vsam", engine, if_exists="append",
+            method="on_conflict_do_update")
+  # or: INSERT INTO payment_vsam ... ON CONFLICT (key) DO UPDATE SET ...
+
+
+================================================================================
+PATTERN 04 — DELETE then DEFINE CLUSTER: reset VSAM dataset before reload
+================================================================================
+
+DATASETS:
+  Target : BATCH.PAYMENT.WORK.KSDS   (VSAM KSDS to be reset)
+
+JCL DD STATEMENTS:
+  //SYSIN  DD *
+
+IDCAMS SYSIN:
+  DELETE BATCH.PAYMENT.WORK.KSDS CLUSTER PURGE
+
+  DEFINE CLUSTER                         -
+    (NAME(BATCH.PAYMENT.WORK.KSDS)       -
+     INDEXED                             -
+     KEYS(9 0)                           -
+     RECORDSIZE(200 200)                 -
+     CYLINDERS(10 5)                     -
+     SHAREOPTIONS(2 3))                  -
+  DATA                                   -
+    (NAME(BATCH.PAYMENT.WORK.KSDS.DATA)) -
+  INDEX                                  -
+    (NAME(BATCH.PAYMENT.WORK.KSDS.INDEX))
+
+BUSINESS RULE:
+  Delete the existing VSAM KSDS and immediately redefine it as a fresh empty
+  dataset before loading new data. PURGE overrides the expiry date, ensuring
+  the DELETE succeeds even if the dataset has a retention date set. This
+  DELETE-then-DEFINE pattern is used in daily batch jobs where the work VSAM
+  must be completely cleared before each run rather than updated in place.
+  The DEFINE specifies: 9-byte key at offset 0, fixed 200-byte records,
+  primary allocation 10 cylinders with 5 secondary, and SHAREOPTIONS(2 3)
+  which allows shared read access across address spaces.
+
+MODERN EQUIV:
+  # Truncate and recreate table in PostgreSQL
+  engine.execute("TRUNCATE TABLE payment_work")
+  # or DROP TABLE IF EXISTS payment_work; CREATE TABLE payment_work (...)
+
+
+================================================================================
+PATTERN 05 — DEFINE CLUSTER: create ESDS for sequential VSAM output
+================================================================================
+
+DATASETS:
+  Target : BATCH.TRANSACTION.LOG.ESDS  (VSAM ESDS — entry sequenced)
+
+JCL DD STATEMENTS:
+  //SYSIN  DD *
+
+IDCAMS SYSIN:
+  DEFINE CLUSTER                              -
+    (NAME(BATCH.TRANSACTION.LOG.ESDS)         -
+     NONINDEXED                               -
+     RECORDSIZE(300 300)                      -
+     CYLINDERS(20 10)                         -
+     SHAREOPTIONS(1 3))                       -
+  DATA                                        -
+    (NAME(BATCH.TRANSACTION.LOG.ESDS.DATA))
+
+BUSINESS RULE:
+  Define a VSAM Entry Sequenced Dataset (ESDS). NONINDEXED means no key field
+  and no index component — records are stored and retrieved in the order they
+  were written. ESDS is used here for a transaction audit log because the log
+  must preserve insertion order and never require keyed access. Records are
+  300 bytes fixed length. SHAREOPTIONS(1 3) allows only one writer at a time
+  but permits multiple readers. The DATA component name must be explicitly
+  defined; no INDEX component is created for ESDS.
+
+MODERN EQUIV:
+  # Append-only log table in PostgreSQL
+  CREATE TABLE transaction_log (
+      log_seq    BIGSERIAL PRIMARY KEY,
+      record_data BYTEA NOT NULL
+  );
+
+
+================================================================================
+PATTERN 06 — LISTCAT: verify dataset existence and retrieve attributes
+================================================================================
+
+DATASETS:
+  Target : BATCH.PAYMENT.VSAM.KSDS
+
+JCL DD STATEMENTS:
+  //SYSIN    DD *
+  //SYSPRINT DD SYSOUT=*
+
+IDCAMS SYSIN:
+  LISTCAT ENTRIES(BATCH.PAYMENT.VSAM.KSDS) -
+          ALL
+
+BUSINESS RULE:
+  List all catalog attributes for the named VSAM cluster. The ALL parameter
+  returns the complete attribute set including: dataset organization, key
+  length and offset, record size, space allocation, creation and expiry dates,
+  and statistics (number of records, CI splits, CA splits). This step is
+  used in production jobs to verify that a prerequisite VSAM dataset exists
+  and was created with the correct key and record size before attempting to
+  load or read it. A non-zero return code from LISTCAT (typically RC=8) means
+  the dataset does not exist in the catalog.
+
+MODERN EQUIV:
+  # Check table exists in PostgreSQL
+  SELECT table_name, pg_total_relation_size(table_name::regclass)
+  FROM information_schema.tables
+  WHERE table_name = 'payment_vsam';
+
+
+================================================================================
+PATTERN 07 — Modal IF-THEN-ELSE: conditional processing based on REPRO result
+================================================================================
+
+DATASETS:
+  Input  : BATCH.PAYMENT.INPUT.SEQ
+  Output : BATCH.PAYMENT.VSAM.KSDS
+  Error  : BATCH.PAYMENT.ERROR.SEQ
+
+JCL DD STATEMENTS:
+  //SEQIN    DD DSN=BATCH.PAYMENT.INPUT.SEQ,DISP=SHR
+  //VSAMOUT  DD DSN=BATCH.PAYMENT.VSAM.KSDS,DISP=SHR
+  //ERROUT   DD DSN=BATCH.PAYMENT.ERROR.SEQ,DISP=SHR
+  //SYSIN    DD *
+
+IDCAMS SYSIN:
+  REPRO INFILE(SEQIN)     -
+        OUTFILE(VSAMOUT)  -
+        REPLACE
+
+  IF LASTCC = 0 THEN           -
+    LISTCAT ENTRIES(BATCH.PAYMENT.VSAM.KSDS) ALL -
+  ELSE                         -
+    REPRO INFILE(SEQIN)        -
+          OUTFILE(ERROUT)
+
+BUSINESS RULE:
+  Load the sequential input into the VSAM KSDS. If the REPRO succeeds
+  (LASTCC=0), run LISTCAT to capture the post-load statistics in the job log
+  for audit purposes. If the REPRO fails for any reason (LASTCC not equal to 0),
+  copy the input records to an error file for investigation instead of simply
+  failing the job silently. The IF-THEN-ELSE modal command is IDCAMS conditional
+  logic embedded in the SYSIN stream — it is not JCL COND= logic. This pattern
+  is used wherever a load failure must be captured without bringing down the
+  entire job.
+
+MODERN EQUIV (Python):
+  try:
+      load_to_vsam(input_file, vsam_target)
+      log_stats(vsam_target)
+  except LoadError as e:
+      copy_to_error_file(input_file, error_target)
+      raise
+
+
+================================================================================
+PATTERN 08 — DELETE: remove work datasets at end of job
+================================================================================
+
+DATASETS:
+  Targets: Multiple work datasets created during the job
+
+JCL DD STATEMENTS:
+  //SYSIN  DD *
+
+IDCAMS SYSIN:
+  DELETE BATCH.PAYMENT.WORK.KSDS    CLUSTER   PURGE SCRATCH
+  DELETE BATCH.PAYMENT.SORT.SEQ     NONVSAM   PURGE SCRATCH
+  DELETE BATCH.PAYMENT.EXTRACT.SEQ  NONVSAM   PURGE SCRATCH
+
+  IF LASTCC > 8 THEN
+    SET MAXCC = 0
+
+BUSINESS RULE:
+  Delete all work datasets created during the batch run as a cleanup step.
+  PURGE overrides retention dates. SCRATCH removes the VTOC entry from the
+  volume, freeing the disk space immediately. The IF LASTCC > 8 / SET MAXCC=0
+  block resets the condition code after the DELETEs. This prevents the cleanup
+  step from causing the job to fail if any work dataset does not exist (e.g.
+  because an earlier step abended before creating it). RC=8 from DELETE means
+  dataset not found — acceptable in cleanup. RC>8 means a real error but we
+  still suppress it here since cleanup failures should not mask the original
+  processing failure.
+
+MODERN EQUIV (Python):
+  import os
+  work_files = ["payment_work.dat", "sort_work.dat", "extract_work.dat"]
+  for f in work_files:
+      try:
+          os.remove(f)
+      except FileNotFoundError:
+          pass  # acceptable — file may not exist if earlier step failed
+
+
+================================================================================
+PATTERN 09 — REPRO FROMKEY/TOKEY/SKIPREC/COUNT: partial VSAM extract
+================================================================================
+
+DATASETS:
+  Input  : BATCH.ACCOUNT.MASTER.KSDS  (VSAM KSDS, 500,000 records)
+  Output : BATCH.ACCOUNT.PARTIAL.SEQ  (PS — sequential)
+
+JCL DD STATEMENTS:
+  //VSAMIN   DD DSN=BATCH.ACCOUNT.MASTER.KSDS,DISP=SHR
+  //SEQOUT   DD DSN=BATCH.ACCOUNT.PARTIAL.SEQ,DISP=SHR
+  //SYSIN    DD *
+
+IDCAMS SYSIN:
+  REPRO INFILE(VSAMIN)       -
+        OUTFILE(SEQOUT)      -
+        FROMKEY(100000000)   -
+        TOKEY(199999999)     -
+        COUNT(50000)
+
+BUSINESS RULE:
+  Extract up to 50,000 records from the account master KSDS where the key
+  falls in the range 100000000 to 199999999. The COUNT parameter stops the
+  extract after 50,000 records even if more records exist in the key range.
+  This pattern is used in regional batch splits where different key ranges
+  are assigned to different processing regions. COUNT provides a safety cap
+  to prevent runaway extracts if the key range is accidentally specified too
+  broadly.
+
+MODERN EQUIV (Python/SQL):
+  df = pd.read_sql("""
+      SELECT * FROM account_master
+      WHERE account_key BETWEEN '100000000' AND '199999999'
+      ORDER BY account_key
+      LIMIT 50000
+  """, engine)
+
+
+================================================================================
+PATTERN 10 — DEFINE CLUSTER with REUSE: reusable work VSAM
+================================================================================
+
+DATASETS:
+  Target : BATCH.PAYMENT.REUSE.KSDS
+
+JCL DD STATEMENTS:
+  //SYSIN  DD *
+
+IDCAMS SYSIN:
+  DEFINE CLUSTER                           -
+    (NAME(BATCH.PAYMENT.REUSE.KSDS)        -
+     INDEXED                               -
+     KEYS(16 0)                            -
+     RECORDSIZE(400 400)                   -
+     CYLINDERS(50 10)                      -
+     REUSE                                 -
+     SHAREOPTIONS(2 3))                    -
+  DATA                                     -
+    (NAME(BATCH.PAYMENT.REUSE.KSDS.DATA))  -
+  INDEX                                    -
+    (NAME(BATCH.PAYMENT.REUSE.KSDS.INDEX))
+
+BUSINESS RULE:
+  Define a VSAM KSDS with the REUSE attribute. REUSE means the dataset can be
+  opened with DISP=SHR and treated as if it were empty each time it is opened
+  for output, without requiring a DELETE/DEFINE cycle. This is more efficient
+  than DELETE/DEFINE for high-frequency work datasets that are loaded and
+  cleared multiple times per day. The 16-byte key at offset 0 matches the
+  transaction reference number length. REUSE is only appropriate for work
+  datasets, never for datasets that accumulate data across runs.
+
+MODERN EQUIV:
+  # TRUNCATE TABLE is the REUSE equivalent — fast clear without drop/recreate
+  engine.execute("TRUNCATE TABLE payment_reuse_work")
+
+
+================================================================================
+END OF IDCAMS PATTERNS FILE
+================================================================================
