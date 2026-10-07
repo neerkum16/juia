@@ -446,6 +446,11 @@ def decode_with_claude(step, rag_context, api_client):
     decoded_data["sysin_source"]  = step.get("sysin_source", "")
     decoded_data["sysin_dsn"]     = step.get("sysin_dsn", "")
     decoded_data["decode_status"] = DECODE_STATUS_SUCCESS
+    decoded_data["sysin_content"] = step.get("sysin_content", "")
+    decoded_data["dd_statements"] = [
+        {"ddname": dd.get("ddname", ""), "parameters": dd.get("parameters", "")}
+        for dd in step.get("dd_statements", [])
+    ]
 
     print(f"  Decoded successfully. Confidence: "
           f"{decoded_data.get('decode_confidence', 'unknown')}")

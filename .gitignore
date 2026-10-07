@@ -17,7 +17,7 @@ corpus/raw/
 corpus/vectordb/
 
 # Generated outputs
-outputs/
+# outputs/
 
 # OS files
 .DS_Store
