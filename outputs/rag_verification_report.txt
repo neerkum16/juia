@@ -1,0 +1,318 @@
+======================================================================
+  JUIA — RAG Verification Report
+  Generated : 2026-10-04 11:43:15
+  Collection: juia_corpus
+  Total chunks in database: 2,885
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+Query 1/18: DFSORT — INCLUDE statement with Zoned Decimal comparison
+──────────────────────────────────────────────────────────────────────
+Search text  : DFSORT INCLUDE COND syntax ZD field comparison greater than zero
+Expected src : dfsort_apg
+
+  Result 1: GOOD | dist=0.3098 | source=dfsort_apg | ✓ MATCH
+  put records are to be included in the output data sets. NONE specifies that none of the input records are to be included in the output data sets. Default: ALL. See Appendix B, “Specification/override of DFSORT options,” on page 801 for full override details. Applicable Functions: See Appendix B, “Specification/override of DFSORT options,” on page 801. FORMAT FORMAT=f FORMAT=f can be used to...
+
+  Result 2: GOOD | dist=0.3275 | source=dfsort_apg | ✓ MATCH
+  DE statement. COND specifies that only input records with equal 6-byte character compare fields starting in position 40 and position 50 are to be included in the output data set. The character (CH) compare fields will be compared according to the collating rules defined in locale FR_CA. Example 13: Sort with z/OS UNIX files INPUT Concatenated z/OS UNIX Files OUTPUT z/OS UNIX File WORK DATA SETS...
+
+  Result 3: GOOD | dist=0.3646 | source=dfsort_apg | ✓ MATCH
+  t byte position 11 for 4 Unicode characters. The comparison uses binary collating sequence based on Unicode code point values. OMIT COND=(21,40,UTF16,EQ,151,40,UTF16) INCLUDE Control Statement 124 z/OS: z/OS DFSORT Application Programming Guide Explanation: Omit the records if UTF16 format data at position 21 for 40 characters is equal to UTF16 format data at 151 for 40 characters. OUTFIL...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 2/18: DFSORT — OUTFIL multi-output splitting
+──────────────────────────────────────────────────────────────────────
+Search text  : OUTFIL FNAMES split records into multiple output files based on field value
+Expected src : dfsort_apg
+
+  Result 1: GOOD | dist=0.3419 | source=dfsort_apg | ✓ MATCH
+  he reformatted OUTFIL records in one of the following ways using unedited, edited, or converted input fields (p,m for fixed fields, or %nn for parsed fields - see PARSE) and a variety of constants: • BUILD or OUTREC: Reformat each record by specifying all of its items one by one. Build gives you complete control over the items you want in your reformatted OUTFIL records and the order in which...
+
+  Result 2: GOOD | dist=0.3446 | source=dfsort_apg | ✓ MATCH
+  second OUTFIL data set in the group will receive records 11-20. • the third OUTFIL data set in the group will receive records 21-35. The records are contiguous in each OUTFIL data set. The SPLIT1R parameter cannot be used with any of the following parameters: IFTRAIL, LINES, HEADER1, TRAILER1, HEADER2, TRAILER2, SECTIONS, and NODETAIL. specifies the number of records to split by. The value for n...
+
+  Result 3: GOOD | dist=0.3727 | source=dfsort_apg | ✓ MATCH
+  OUTFIL FNAMES=OUT1,SAMPLE=5 * PROCESS RECORDS 1, 2, 1001, 1002, 2001, 2002 OUTFIL FNAMES=OUT2,SAMPLE=(1000,2),ENDREC=2500 * PROCESS RECORDS 23, 48, 73 OUTFIL FNAMES=OUT3,STARTREC=23,ENDREC=75,SAMPLE=25 * PROCESS RECORDS 1001, 1002, 1003, 1101, 1102, 1103, ... OUTFIL FNAMES=OUT4,STARTREC=1001,SAMPLE=(100,3) Default for SAMPLE: None; must be specified. INCLUDE INCLUDE= (logical expression) NONE...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 3/18: DFSORT — SORT and record reformatting
+──────────────────────────────────────────────────────────────────────
+Search text  : SORT FIELDS packed decimal descending INREC OUTREC field reformatting
+Expected src : dfsort_apg
+
+  Result 1: GOOD | dist=0.3113 | source=dfsort_apg | ✓ MATCH
+  transformed according to the specified century window of 1985-2084. A BI field containing X'01', X'02', X'03' or X'FF' as determined by using a lookup table for the input field in positions 25-27. The SORT statement can now refer to the "sort" field in the reformatted input records. The OUTREC statement is used to restore the records to their original format. Example 5 INREC...
+
+  Result 2: GOOD | dist=0.4021 | source=dfsort_apg | ✓ MATCH
+  do not start and end in the same position in every record and do not have the same length in every record. The first and second fields end with a comma and the third field ends with a blank. In order to sort variable fields like these, we use the PARSE and OVERLAY functions of INREC to create a fixed parsed copy of each variable field. We use %00 to create an 11-byte fixed parsed field into which...
+
+  Result 3: GOOD | dist=0.4044 | source=dfsort_apg | ✓ MATCH
+  to the record as reformatted by INREC. If your E15 user exit reformats the record, and INREC is not specified, p must refer to the record as reformatted by your E15 user exit. SORT Control Statement 422 z/OS: z/OS DFSORT Application Programming Guide control fields, except binary, must begin on a byte boundary. The first byte of a floating-point field is interpreted as a signed exponent; the rest...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 4/18: DFSORT — ICETOOL SELECT operator
+──────────────────────────────────────────────────────────────────────
+Search text  : ICETOOL SELECT FROM operator FIRST records top N by field value
+Expected src : dfsort_apg
+
+  Result 1: GOOD | dist=0.3577 | source=dfsort_apg | ✓ MATCH
+  ord of those with ON values that occur more than once (value count > 1). You can use this operand to keep just the first record for each unique field value. FIRST is equivalent to FIRST(1). SELECT Operator Chapter 7. Using ICETOOL 629 FIRST(u) Limits the records selected to those with ON values that occur only once (value count = 1) and the first u records of those with ON values that occur more...
+
+  Result 2: GOOD | dist=0.4682 | source=dfsort_apg | ✓ MATCH
+  containing the minimum, maximum, average, and total for specified numeric fields in a data set. SUBSET Selects records from a data set based on keeping or removing header records (the first n records), relative records, or trailer records (the last n records). Records that are not selected can be saved in a separate output data set. UNIQUE Prints a message containing the count of unique values...
+
+  Result 3: GOOD | dist=0.4851 | source=dfsort_patterns | ✗ MISS
+  8, Format CH : Transaction date YYYYMMDD Offset 34, Length 2, Format CH : Status Offset 36, Length 3, Format CH : Transaction type ICETOOL CONTROL CARDS: SORT FROM(INFILE) TO(SORTED) USING(SRTCNTL) SRTCNTL SYSIN: SORT FIELDS=(17,9,PD,D) ICETOOL TOOLIN: SELECT FROM(SORTED) TO(TOP100) ON(17,9,PD) FIRST(100) BUSINESS RULE: Sort all transaction records by amount descending, then select only the top...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 5/18: IDCAMS — REPRO command for file copy and load
+──────────────────────────────────────────────────────────────────────
+Search text  : REPRO INFILE OUTFILE copy records VSAM sequential dataset
+Expected src : idcams
+
+  Result 1: GOOD | dist=0.3593 | source=idcams | ✓ MATCH
+  ta records are copied from the non-VSAM data set SEQ.DRGV, a sequential data set, into a key-sequenced VSAM data set, RPR.MYDATA. Next, records are copied from the key- sequenced data set, RPR.MYDATA, into an entry-sequenced data set, ENTRY. //REPRO2 JOB ... //STEP1 EXEC PGM=IDCAMS //INPUT DD DSNAME=SEQ.DRGV,DISP=SHR,DCB=(BUFNO=6) //SYSPRINT DD SYSOUT=A //SYSIN DD * REPRO - INFILE(INPUT) -...
+
+  Result 2: GOOD | dist=0.3680 | source=idcams | ✓ MATCH
+  pecified, the entryname is dynamically allocated with a disposition of OLD. You can copy a base cluster in alternate-key sequence by specifying a path name for the entryname. If you are copying a member of a non-VSAM partitioned data set, the entryname must be specified in the format: pdsname(membername) Abbreviation: IDS OUTFILE(ddname)| OUTDATASET( entryname) identifies the target data set. If...
+
+  Result 3: GOOD | dist=0.3692 | source=idcams | ✓ MATCH
+  records of the key-sequenced data set RPR.MYDATA into an entry-sequenced data set, ENTRY. STEP2's job control language statements: • INPUT DD identifies the key-sequenced cluster, RPR.MYDATA, that contains the source records. • OUTPUT DD identifies the entry-sequenced cluster, ENTRY, that the records are to be copied into. STEP2's REPRO command copies records from the source data set, RPR.MYDATA,...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 6/18: IDCAMS — DEFINE CLUSTER for KSDS creation
+──────────────────────────────────────────────────────────────────────
+Search text  : DEFINE CLUSTER INDEXED KEYS RECORDSIZE CYLINDERS VSAM KSDS
+Expected src : idcams
+
+  Result 1: GOOD | dist=0.3329 | source=idcams | ✓ MATCH
+  ed. With sequential processing, if enough I/O buffers are available, VSAM can perform a read-ahead, thereby reducing system overhead and minimizing rotational delay. • FREESPACE specifies that 20% of each control interval and 10% of each control area are to be left free when records are loaded into the cluster. After the cluster's records are loaded, the free space can be used to contain new...
+
+  Result 2: GOOD | dist=0.3338 | source=idcams | ✓ MATCH
+  D SYSOUT=A //SYSIN DD * DEFINE CLUSTER - (NAME(VWX.MYDATA) - VOLUMES(VSER02) - RECORDS(1000 500)) - DATA - (NAME(VWX.KSDATA) - KEYS(15 0) - RECORDSIZE(250 250) - FREESPACE(20 10) - BUFFERSPACE(25000) ) - INDEX - (NAME(VWX.KSINDEX) - CATALOG (RSTUCAT1) The DEFINE CLUSTER command builds a cluster entry, a data entry, and an index entry to define the key- sequenced cluster VWX.MYDATA. The parameters...
+
+  Result 3: GOOD | dist=0.3719 | source=idcams | ✓ MATCH
+  r, VWX.EXAMPLE.KSDS1. The second DEFINE command defines an entry-sequenced VSAM cluster, KLM.EXAMPLE.ESDS1. In both examples, it is assumed that alias names, VWX and KLM, have been defined for user catalogs RSTUCAT1 and RSTUCAT2, respectively. //DEFCLU2 JOB ... //STEP1 EXEC PGM=IDCAMS //SYSPRINT DD SYSOUT=A //SYSIN DD * DEFINE CLUSTER - (NAME(VWX.EXAMPLE.KSDS1) - MODEL(VWX.MYDATA) -...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 7/18: IDCAMS — DELETE command
+──────────────────────────────────────────────────────────────────────
+Search text  : DELETE cluster PURGE SCRATCH remove dataset catalog entry
+Expected src : idcams
+
+  Result 1: GOOD | dist=0.3473 | source=idcams | ✓ MATCH
+  E command deletes the key-sequenced VSAM cluster from the GGGUCAT2 catalog. Its parameters are: • EXAMPLE.KSDS1, which is a key-sequenced VSAM cluster, is the entryname of the object being deleted. • FILE is not required but improves performance if specified. • PURGE specifies that the cluster is to be deleted regardless of its retention period or date. • ERASE specifies that the cluster's data...
+
+  Result 2: GOOD | dist=0.3503 | source=idcams | ✓ MATCH
+  than one cataloged object is deleted with a single DELETE command. //DELET3 JOB ... //STEP1 EXEC PGM=IDCAMS DELETE 230 z/OS: z/OS DFSMS Access Method Services Commands //SYSPRINT DD SYSOUT=A //SYSIN DD * DELETE - (EXAMPLE.KSDS01 - EXAMPLE.KSDS02) - PURGE - CLUSTER The DELETE command deletes the key-sequenced clusters EXAMPLE.KSD01 and EXAMPLE.KSD02. Both entries are dynamically allocated in order...
+
+  Result 3: GOOD | dist=0.3759 | source=idcams | ✓ MATCH
+  s always set to SPANNED. • KEYS values are ignored. With DATABASE, the value is always set to KEYS(132 0). The DATA and INDEX parameters shown are: • CYLINDERS – with the DATABASE parameter, the minimum allocation is set to one cylinder, and overridden to one cylinder if a lower value was specified. The CI size is likewise set to a minimum of 4K bytes. (The specified value of 32KB is overridden...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 8/18: IDCAMS — Modal IF-THEN-ELSE control flow
+──────────────────────────────────────────────────────────────────────
+Search text  : IF LASTCC modal command THEN ELSE condition code IDCAMS
+Expected src : idcams
+
+  Result 1: GOOD | dist=0.4216 | source=idcams | ✓ MATCH
+  ce in your IDCAMS job, perform either one of the following tasks: • Specify the data set name instead of the DD name • Use a separate job step to perform any sequence of commands (for example, REPRO, IMPORT, BLDINDEX, PRINT, or EXAMINE) that follow a DEFINE command. IF-THEN-ELSE Command Sequence The syntax of the IF-THEN-ELSE command sequence, which controls command execution, is: Command...
+
+  Result 2: GOOD | dist=0.4700 | source=idcams | ✓ MATCH
+  : When an IF command appears within a THEN or ELSE clause, it is called a nested IF command. See “Using Nested IF Commands: Example 1” on page 17. • The maximum level of nesting allowed is 10, starting with the first IF. • Within a nest of IF commands: • The innermost ELSE clause is associated with the innermost THEN clause, • The next innermost ELSE clause with the next innermost THEN clause,...
+
+  Result 3: GOOD | dist=0.4841 | source=idcams | ✓ MATCH
+  y a command continuation character. If THEN or ELSE is not followed by either a continuation character or by a command in the same record, the THEN or ELSE results in no action. The null command supports an ELSE command that balances an IF-THEN-ELSE command sequence, and allows null THEN commands. If you want to indicate a null ELSE command, say: ELSE If you want to indicate a null THEN command,...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 9/18: IEBGENER — GENERATE and RECORD control statements
+──────────────────────────────────────────────────────────────────────
+Search text  : IEBGENER GENERATE MAXFLDS RECORD FIELD input output offset length
+Expected src : dfsmdfp_utilities
+
+  Result 1: GOOD | dist=0.4188 | source=dfsmdfp_utilities | ✓ MATCH
+  are single- byte characters, so the pair will take up two positions. The final FIELD parameter clears out the final positions of the output records with asterisks. IEBGENER Chapter 7. IEBGENER (Sequential Copy/Generate Data Set) Program 169
+
+  Result 2: GOOD | dist=0.4354 | source=iebgener_patterns | ✗ MISS
+  field from display format to packed storage format for downstream program that reads packed decimal. FIELD=(4,30,ZP,30) Take 4 bytes at input offset 30, convert from Packed Decimal to Zoned Decimal, write to output offset 30 (same position). Meaning: Convert a packed decimal date in place to character display format. FIELD=(2,13,,10) Copy 2 bytes from input offset 13 to output offset 10. No...
+
+  Result 3: GOOD | dist=0.4449 | source=dfsmdfp_utilities | ✓ MATCH
+  l value between X'41' and X'FE', or the 2-byte character must be a DBCS space (X'4040'). Once the checking and inserting are completed, this field is to be copied to the output records beginning at position 21. • The third FIELD parameter operates on the 30-byte field beginning at position 50 in the input records. This field is checked for valid DBCS data, and shift-out/shift-in characters are...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 10/18: IEBCOPY — member selection and copy operations
+──────────────────────────────────────────────────────────────────────
+Search text  : IEBCOPY SELECT EXCLUDE members copy merge partitioned dataset PDS
+Expected src : dfsmdfp_utilities
+
+  Result 1: GOOD | dist=0.3658 | source=dfsmdfp_utilities | ✓ MATCH
+  ied, because DATASETA already contains the other members. Because the INDD statement is not followed by an EXCLUDE or SELECT statement, a full copy is performed. IEBCOPY Chapter 4. IEBCOPY (Library Copy) Program 101 Compress-in-Place Operation Input DATASETA DATASETA DATASETB Before copy operation After compressing in place After processing DATASETB Output Unused Unused Unused Unused Unused...
+
+  Result 2: GOOD | dist=0.3662 | source=dfsmdfp_utilities | ✓ MATCH
+  ata set (PDSESETB). Example 17: Copy Selected Members and their Aliases from a PDS to a PDS In this example, selected members and their aliases are copied from a PDS to a PDS, while an EXCLUDE statement is used to prevent other members and their aliases from being copied. The SELECT and EXCLUDE statements can be used only if the operation is a COPYGROUP and member name filter pattern masking is...
+
+  Result 3: GOOD | dist=0.3669 | source=dfsmdfp_utilities | ✓ MATCH
+  ition, a data set can be copied to its own volume, provided its data set name is changed. (If the data set name is not changed, IEBCOPY interprets the request as a compress-in-place, provided the SELECT / EXCLUDE statement is not coded.) When you use IEBCOPY to copy a PDSE to a PDSE, either volume to volume or to its own volume, all DDM attributes are also copied. Members copied into a...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 11/18: JCL — DD statement DISP parameter
+──────────────────────────────────────────────────────────────────────
+Search text  : DD statement DISP parameter NEW OLD SHR MOD dataset disposition
+Expected src : mvs_jcl_reference
+
+  Result 1: GOOD | dist=0.3324 | source=mvs_jcl_reference | ✓ MATCH
+  statement. Thus, for the following DD statement, even though DISP=MOD is specified, the system positions the read/ write mechanism after the last record on the volume specified in the volume sequence number in the label; this volume may or may not be the last volume. //DD1 DD DSNAME=MULTI1,DISP=MOD,DCB=CATDD To control which volume is processed, code a volume sequence number. //DD2 DD...
+
+  Result 2: GOOD | dist=0.3356 | source=mvs_jcl_reference | ✓ MATCH
+  gardless of whether or not the volume information in the catalog matches the volume information that is used for the dataset. Defaults • If you omit the status subparameter, the default is NEW. • If you omit the normal termination disposition subparameter, the default is DELETE for a NEW data set or KEEP for an existing data set. • If you omit the abnormal termination disposition subparameter,...
+
+  Result 3: GOOD | dist=0.3432 | source=mvs_jcl_reference | ✓ MATCH
+  ])} DISP= ( [NEW] [,DELETE ] [,DELETE ] ) [OLD] [,KEEP ] [,KEEP ] [SHR] [,PASS ] [,CATLG ] [MOD] [,CATLG ] [,UNCATLG] [, ] [,UNCATLG] [, ] • You can omit the parentheses if you code only the status subparameter. • If you omit the status subparameter but code subparameters for normal or abnormal termination disposition, you must code a comma to indicate the absence of NEW. For example,...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 12/18: JCL — EXEC statement COND parameter
+──────────────────────────────────────────────────────────────────────
+Search text  : EXEC statement COND parameter step condition code comparison
+Expected src : mvs_jcl_reference
+
+  Result 1: EXCELLENT | dist=0.2951 | source=mvs_jcl_reference | ✓ MATCH
+  EXEC statement named in the procstepname qualifier, which is to the left of the equals sign. The parameter applies only to the named procedure step. The EXEC statement can have as many COND.procstepname parameters as the procedure has steps; each COND parameter must specify a unique procstepname. • All EXEC statements in the procedure if procstepname is not coded. Then the parameter applies to...
+
+  Result 2: GOOD | dist=0.3002 | source=mvs_jcl_reference | ✓ MATCH
+  than GE Greater than or equal to EQ Equal to LT Less than LE Less than or equal to NE Not equal to stepname Identifies the EXEC statement of a previous job step that issues the return code to be used in the test. If the specified step is in a procedure, this step must be in the same procedure. Otherwise, the specified step must not be in a procedure; the specified step must contain a PGM keyword,...
+
+  Result 3: GOOD | dist=0.3704 | source=mvs_jcl_reference | ✓ MATCH
+  does not name a previous step, the system tests all previous steps. If any test is satisfied, the system takes action on the current step, per the char above. Table 22. Effect of EVEN and ONLY Subparameters on Step Execution EVEN or ONLY Specified? Any Preceding Abend? Any Tests Satisfied? Current Step Execute? EVEN EVEN EVEN EVEN ONLY ONLY ONLY ONLY Neither Neither Neither Neither Examples of...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 13/18: JCL — DCB sub-parameters for dataset attributes
+──────────────────────────────────────────────────────────────────────
+Search text  : DCB parameter RECFM LRECL BLKSIZE fixed blocked record format
+Expected src : mvs_jcl_reference
+
+  Result 1: GOOD | dist=0.3697 | source=mvs_jcl_reference | ✓ MATCH
+  data set, or (3) a 7-track tape unless the data conversion feature (TRTCH=C) is used. Default: U Overrides RECFM overrides the record format that is specified in the data set label, and with SMS, RECFM overrides the record format defined in the DATACLAS parameter for the data set. See “Overrides” on page 123. RECFM also overrides any contradictory information from the LIKE data set, the REFDD DD...
+
+  Result 2: GOOD | dist=0.3971 | source=dfsmdfp_utilities | ✗ MISS
+  ng variable or variable blocked records, the block size must be a minimum of the logical record length plus four. The block size cannot exceed 32760 bytes. If you do not specify anything for DCB parameters, and the data set label has no DCB parameters, IEBCOPY will choose RECFM=FBA, LRECL=121, and a block size. When the output device is DASD or a standard labeled tape, the system will determine...
+
+  Result 3: GOOD | dist=0.3976 | source=dfsort_apg | ✗ MISS
+  , LRECL is set to n. Use WIDTH(n) if your LRECL must be set to a particular value (for example, if you use DISP=MOD to place several reports in the same data set). – If WIDTH(n) is not specified and NOCC is not specified, LRECL is set to 121 or to the calculated required line length if it is greater than 121 characters. – If WIDTH(n) is not specified and NOCC is specified, LRECL is set to 120 or...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 14/18: Synthetic — DFSORT account filter pattern with PySpark
+──────────────────────────────────────────────────────────────────────
+Search text  : filter active account status non-zero balance PySpark equivalent
+Expected src : dfsort_patterns
+
+  Result 1: GOOD | dist=0.3017 | source=dfsort_patterns | ✓ MATCH
+  AND the balance at offset 15 length 7 as Zoned Decimal is greater than zero. Sort the surviving records in ascending order by account number. This pattern is used at the start of end-of-day account processing to isolate accounts that are open and have funds available for further processing. MODERN EQUIV (PySpark): df.filter((col("account_status") == "AC") & (col("balance") > 0)) \...
+
+  Result 2: GOOD | dist=0.3922 | source=dfsort_patterns | ✓ MATCH
+  ZD : Balance in cents Offset 22, Length 8, Format CH : Account open date YYYYMMDD CONTROL CARDS: SORT FIELDS=(1,9,CH,A) OUTFIL FNAMES=ACTIVE, INCLUDE=(13,2,CH,EQ,C'AC') OUTFIL FNAMES=CLOSED, INCLUDE=(13,2,CH,EQ,C'CL') OUTFIL FNAMES=SUSPND, INCLUDE=(13,2,CH,EQ,C'SU') OUTFIL FNAMES=DORMANT, INCLUDE=(13,2,CH,EQ,C'DO') BUSINESS RULE: Sort all account records by account number then split into four...
+
+  Result 3: GOOD | dist=0.3950 | source=dfsort_patterns | ✓ MATCH
+  loaded and amounts balance. MODERN EQUIV (PySpark): df.agg( count("amount").alias("record_count"), spark_sum("amount").alias("total_amount"), min("amount").alias("min_amount"), max("amount").alias("max_amount") ================================================================================ PATTERN 11 — JOINKEYS: enrich transactions with account master data...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 15/18: Synthetic — DFSORT high-value transaction extraction
+──────────────────────────────────────────────────────────────────────
+Search text  : wire transfer high value amount threshold pending status exception
+Expected src : dfsort_patterns
+
+  Result 1: GOOD | dist=0.4521 | source=dfsort_patterns | ✓ MATCH
+  3, Format CH : Transaction type (WIR=Wire, ACH=ACH, CHQ=Cheque) Offset 55, Length 2, Format CH : Status (PE=Pending, CM=Complete, RJ=Rejected) Offset 57, Length 4, Format CH : Reason code CONTROL CARDS: INCLUDE COND=(35,9,PD,GT,+1000000,AND,52,3,CH,EQ,C'WIR',AND,55,2,CH,EQ,C'PE') SORT FIELDS=(35,9,PD,D,44,8,CH,A) BUSINESS RULE: Extract all wire transfer transactions (type='WIR') that are still...
+
+  Result 2: MODERATE | dist=0.6993 | source=mvs_jcl_reference | ✗ MISS
+  atus Normal termination disposition Abnormal termination disposition At normal end of step At abnormal end of step At End of Job Step abnormally terminated If later allocation failed in step data set in step to be restarted at checkpoint DELETE KEEP PASS CATLG UNCATLG DELETE KEEP CATLG UNCATLG kept, if being used when checkpoint was taken OLD or SHR or MOD treated as old none none kept kept kept...
+
+  Result 3: POOR | dist=0.7155 | source=mvs_jcl_reference | ✗ MISS
+  assumed to be in deadlock and ended with VSAM return code 8 and reason code 22(X'16'). Specify RLSTMOUT as a value in seconds in the range of 0 to 9999. A value of 0 means that the VSAM RLS or DFSMStvs request has no timeout value; the request waits as long as necessary to obtain the required lock. The value does not apply to promote requests. A promote request is a request to change shared...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 16/18: Synthetic — IDCAMS REPRO with REPLACE parameter
+──────────────────────────────────────────────────────────────────────
+Search text  : REPRO REPLACE duplicate key load update existing VSAM records
+Expected src : idcams_patterns
+
+  Result 1: GOOD | dist=0.3922 | source=idcams_patterns | ✓ MATCH
+  meter allows records with duplicate keys to overwrite the existing VSAM record rather than causing an error. Records with keys not already in the KSDS are inserted as new records. This is the standard intraday update pattern: the update file contains both new transactions and corrections to previously loaded records. Without REPLACE this step would abend on the first duplicate. MODERN EQUIV: #...
+
+  Result 2: GOOD | dist=0.4064 | source=idcams | ✗ MISS
+  empty slot its relative record number identifies. REPLACE cannot be used if the target data set is identified as a path through an alternate index, or if the target data set is a base cluster whose upgrade data set includes an alternate index defined with the unique-key attribute. Abbreviation: REP NOREPLACE When a key-sequenced data set (other than a catalog) is copied, target records are not...
+
+  Result 3: GOOD | dist=0.4602 | source=idcams | ✗ MISS
+  pecified, the entryname is dynamically allocated with a disposition of OLD. You can copy a base cluster in alternate-key sequence by specifying a path name for the entryname. If you are copying a member of a non-VSAM partitioned data set, the entryname must be specified in the format: pdsname(membername) Abbreviation: IDS OUTFILE(ddname)| OUTDATASET( entryname) identifies the target data set. If...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 17/18: Synthetic — IDCAMS delete and redefine pattern
+──────────────────────────────────────────────────────────────────────
+Search text  : DELETE then DEFINE CLUSTER reset VSAM dataset before daily batch load
+Expected src : idcams_patterns
+
+  Result 1: GOOD | dist=0.3427 | source=idcams_patterns | ✓ MATCH
+  =============== DATASETS: Target : BATCH.PAYMENT.WORK.KSDS (VSAM KSDS to be reset) JCL DD STATEMENTS: //SYSIN DD * IDCAMS SYSIN: DELETE BATCH.PAYMENT.WORK.KSDS CLUSTER PURGE DEFINE CLUSTER - (NAME(BATCH.PAYMENT.WORK.KSDS) - INDEXED - KEYS(9 0) - RECORDSIZE(200 200) - CYLINDERS(10 5) - SHAREOPTIONS(2 3)) - DATA - (NAME(BATCH.PAYMENT.WORK.KSDS.DATA)) - INDEX - (NAME(BATCH.PAYMENT.WORK.KSDS.INDEX))...
+
+  Result 2: GOOD | dist=0.3627 | source=idcams | ✗ MISS
+  s always set to SPANNED. • KEYS values are ignored. With DATABASE, the value is always set to KEYS(132 0). The DATA and INDEX parameters shown are: • CYLINDERS – with the DATABASE parameter, the minimum allocation is set to one cylinder, and overridden to one cylinder if a lower value was specified. The CI size is likewise set to a minimum of 4K bytes. (The specified value of 32KB is overridden...
+
+  Result 3: GOOD | dist=0.3963 | source=idcams | ✗ MISS
+  S Managing Catalogs If the non-VSAM data set is partitioned, you can delete one of its members by specifying pdsname(membername). If the non-VSAM data set does not have an entry in a catalog, you can delete its format-1 DSCB from the VTOC by using the SCRATCH function of the IEHPROGM utility. See z/OS DFSMSdfp Utilities. Use this parameter to delete generation data sets (GDSs). You can rerun the...
+
+
+──────────────────────────────────────────────────────────────────────
+Query 18/18: Synthetic — IEBGENER plain copy pattern
+──────────────────────────────────────────────────────────────────────
+Search text  : IEBGENER SYSIN DUMMY straight copy backup no transformation
+Expected src : iebgener_patterns
+
+  Result 1: GOOD | dist=0.4452 | source=dfsmdfp_utilities | ✗ MISS
+  ls on sequential output data sets, see “Processing User Labels” on page 369. Creating a Backup Copy You can produce a backup copy of a sequential data set or member of a partitioned data set or PDSE by copying the data set or member to any IBM-supported output device. For example, a copy can be made from tape to tape, from DASD to tape, and so forth. A data set that resides on a direct access...
+
+  Result 2: GOOD | dist=0.4469 | source=dfsmdfp_utilities | ✗ MISS
+  B parameters of an unload data set after IEBCOPY finishes creating it, or IEBCOPY might not be able to reload it. To unload more than one partitioned data set to the same tape volume in one execution of IEBCOPY, multiple copy operations must be used and multiple sequential data sets must be allocated to successive files on the tape. IEBCOPY can copy a PDSU to a PDSU directly without the need to...
+
+  Result 3: GOOD | dist=0.4563 | source=dfsmdfp_utilities | ✗ MISS
+  ents When the SYSIN DD statement is a DD DUMMY, points to an empty file, or is omitted, IEBCOPY will generate a control statement that allows you to run IEBCOPY without supplying a control statement data set for SYSIN. The generated statement can take several forms, depending on what parameters are specified in the JCL EXEC PARM field. 1. When COMPRESS and REPLACE are not specified, the generated...
+
+======================================================================
+SUMMARY
+======================================================================
+   1. DFSORT — INCLUDE statement with Zoned Decimal comp GOOD       HIT
+   2. DFSORT — OUTFIL multi-output splitting             GOOD       HIT
+   3. DFSORT — SORT and record reformatting              GOOD       HIT
+   4. DFSORT — ICETOOL SELECT operator                   GOOD       HIT
+   5. IDCAMS — REPRO command for file copy and load      GOOD       HIT
+   6. IDCAMS — DEFINE CLUSTER for KSDS creation          GOOD       HIT
+   7. IDCAMS — DELETE command                            GOOD       HIT
+   8. IDCAMS — Modal IF-THEN-ELSE control flow           GOOD       HIT
+   9. IEBGENER — GENERATE and RECORD control statements  GOOD       HIT
+  10. IEBCOPY — member selection and copy operations     GOOD       HIT
+  11. JCL — DD statement DISP parameter                  GOOD       HIT
+  12. JCL — EXEC statement COND parameter                EXCELLENT  HIT
+  13. JCL — DCB sub-parameters for dataset attributes    GOOD       HIT
+  14. Synthetic — DFSORT account filter pattern with PyS GOOD       HIT
+  15. Synthetic — DFSORT high-value transaction extracti GOOD       HIT
+  16. Synthetic — IDCAMS REPRO with REPLACE parameter    GOOD       HIT
+  17. Synthetic — IDCAMS delete and redefine pattern     GOOD       HIT
+  18. Synthetic — IEBGENER plain copy pattern            GOOD       miss
+
+  Corpus health : 100% (18/18 GOOD or better)
+======================================================================
