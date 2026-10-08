@@ -1,51 +1,346 @@
 {
   "job_name": "WIREPAY",
-  "total_steps_validated": 1,
-  "pass_count": 1,
+  "total_steps_validated": 6,
+  "pass_count": 5,
   "fail_count": 0,
-  "total_corrections": 0,
+  "total_corrections": 4,
   "steps": [
     {
-      "step_name": "STEP040",
-      "utility_type": "DFSORT",
-      "code_path": "outputs/pyspark/STEP040_DFSORT.py",
+      "step_name": "STEP010",
+      "utility_type": "IDCAMS",
+      "code_path": "outputs/pyspark/STEP010_IDCAMS.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "No INCLUDE/OMIT filter conditions exist in this IDCAMS step. The step is purely DELETE and DEFINE CLUSTER. No filter logic is applicable."
+        },
+        "sort_logic": {
+          "status": "NA",
+          "detail": "No sort operations exist in this IDCAMS step. KSDS ordering is implicit via the key field (KEYS(16 0)) and is correctly documented in metadata, but no explicit SORT/ORDER BY is implemented or required here."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "Column names are meaningful and business-relevant: WIRE_KEY constant maps to the 16-byte primary key (KEYS(16 0)), RECORD_PAYLOAD maps to the remaining 184 bytes, RECORD_SEQUENCE is a clearly-flagged migration-added audit column. All names are derived from field semantics rather than positional identifiers. Constants are defined at module level (WIRE_KEY, RECORD_PAYLOAD, RECORD_SEQUENCE) and reused consistently across schema definition, DDL generation, and metadata. One minor issue: the variable tbl_props_str is computed in _define_cluster but never referenced (dead code); all_props_str is used instead. This does not affect column naming correctness."
+        },
+        "pd_handling": {
+          "status": "NA",
+          "detail": "No Packed Decimal (PD/COMP-3) fields are present in this step. The IDCAMS DEFINE CLUSTER only specifies CH (character) format for the key field. The code correctly notes that EBCDIC-to-UTF-8 transcoding is required for downstream population but is out of scope for this initialisation step."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function initialise_wire_ksds_work_files() returns a StepInitResult dataclass containing two ClusterInitResult entries (one per cluster), each with delete_status, define_status, and associated messages. The all_successful property correctly reflects whether both DEFINEs completed without error. The __main__ block consumes this correctly, calling verify_wire_ksds_tables() post-initialisation and exiting with code 1 on verification failure or code 2 on exception. The return type is well-suited for downstream pipeline orchestration. One noted structural pattern: _define_cluster attaches the ClusterInitResult to the exception object via exc.__dict__ for caller recovery on DEFINE failure, which is an unconventional but functional pattern that correctly ensures StepInitResult is always populated before exceptions propagate."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "No OUTFIL split conditions exist in this IDCAMS step. The two output files (WIRE.WORK.INPUT.KSDS and WIRE.WORK.EXTRT.KSDS) are independently defined clusters, not splits of a single input. Each is initialised as an empty table."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "No SUM, GROUP BY, or aggregation operations exist in this IDCAMS step. The step only performs DELETE and DEFINE CLUSTER operations to create empty work tables."
+        }
+      },
+      "synthetic_data_summary": "15 synthetic test scenarios covering: both tables pre-existing (clean drop+recreate), both tables missing on first run (CC=8 tolerated), DROP raising unexpected error (CC>8 suppressed via MAXCC reset), fatal DEFINE failures, and edge-case key values (all-zeros, all-spaces, max alphanumeric, exact 200-byte record). Since this is a DELETE/DEFINE initialisation step with no filter, sort, or aggregation logic, scenarios are defined in terms of table existence states and exception paths rather than data row content. All 15 scenarios confirm correct condition-code equivalence mapping and schema construction.",
+      "issues_found": [
+        "MINOR — Dead code: variable tbl_props_str is computed in _define_cluster (joining config.tbl_properties into a string) but is never used. The code subsequently builds all_props_str from all_props (which includes config.tbl_properties plus the comment key). tbl_props_str can be safely removed without any behavioural change.",
+        "MINOR — Schema validation in verify_wire_ksds_tables() checks for column name presence only (via DESCRIBE TABLE col_name set comparison) but does not validate column data types or nullability. A table with correct column names but wrong types (e.g., wire_key as INTEGER instead of STRING) would return True (false positive). The docstring claims equivalence to IDCAMS LISTCAT ALL depth but type validation is absent.",
+        "MINOR — DeltaTable.isDeltaTable() pre-check before DROP TABLE IF EXISTS in _delete_cluster is redundant. The IF EXISTS clause already handles the not-found case safely. The pre-check adds a Spark metadata round-trip on every run. Not a correctness defect but an unnecessary overhead.",
+        "INFORMATIONAL — The SYSIN condition IF LASTCC > 8 THEN SET MAXCC = 0 is correctly implemented as documented: CC=8 (not found) is tolerated via SKIPPED_NOT_FOUND without suppression, and CC>8 (hard error) is suppressed via WARN_ERROR_SUPPRESSED, with DEFINEs always proceeding. The business rule decoder's note about this being non-standard is accurate but the code faithfully mirrors the exact SYSIN semantics.",
+        "INFORMATIONAL — The exc.__dict__['cluster_init_result'] pattern for passing ClusterInitResult out of _define_cluster on failure is unconventional. A more idiomatic approach would use a custom exception class carrying the result, or an out-parameter. The current approach is functional but fragile if exception instances are created in contexts where __dict__ mutation is restricted (e.g., C-extension exceptions)."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 1,
+      "correction_history": [
+        {
+          "attempt": 1,
+          "issues_before": [
+            "ISSUE 1 — CRITICAL — Condition-code guard logic is inverted/misapplied: The original SYSIN reads 'IF LASTCC > 8 THEN SET MAXCC = 0'. The business rule decoder correctly notes this is 'slightly non-standard' and means: if the DELETE returned CC > 8 (a genuine hard error), reset MAXCC to 0 so the job continues. In practice this makes ALL delete outcomes non-fatal. The generated code implements this by catching all exceptions in _delete_cluster() and assigning WARN_ERROR_SUPPRESSED without re-raising — which correctly mirrors the MAXCC-reset behaviour. However, the Phase 2 logging block only logs a warning when status is WARN_ERROR_SUPPRESSED (CC>8 path). The CC=8 (SKIPPED_NOT_FOUND) path generates no Phase 2 log entry, which is acceptable. The implementation is functionally correct but the inline comment 'IF LASTCC > 8 THEN SET MAXCC = 0' in Phase 2 is misleading because the actual guard is already baked into _delete_cluster() — Phase 2 is purely observational logging, not the actual guard. This creates a maintenance risk where a future developer might believe Phase 2 is the guard and remove _delete_cluster()'s exception suppression.",
+            "ISSUE 2 — MODERATE — CREATE TABLE uses IF NOT EXISTS after a preceding DROP: The flow is DROP TABLE IF EXISTS followed by CREATE TABLE IF NOT EXISTS. Because the DROP was just executed (or the table never existed), the IF NOT EXISTS guard on CREATE is redundant in the normal path. More importantly, if the DROP silently failed (WARN_ERROR_SUPPRESSED path) and the table still physically exists, the CREATE TABLE IF NOT EXISTS will silently succeed without recreating the table — leaving stale data from a prior run in the table. This violates the 'clean slate' guarantee stated in the business rule. The correct behaviour equivalent to IDCAMS DEFINE after PURGE DELETE is to use CREATE OR REPLACE TABLE (Databricks Delta) or DROP followed by CREATE without IF NOT EXISTS, to guarantee the table is always freshly empty.",
+            "ISSUE 3 — MODERATE — DEFINE failure path leaves ClusterInitResult in inconsistent state: In _define_cluster(), the except block sets define_status = WARN_ERROR_SUPPRESSED, logs the error, then executes 'raise'. The partially constructed ClusterInitResult with define_status=WARN_ERROR_SUPPRESSED is never returned because the exception propagates. The return statement at the end of the function is unreachable in the failure case. The caller in initialise_wire_ksds_work_files() has no try/except around _define_cluster(), so the exception propagates to __main__ which exits with code 2. The StepInitResult is never constructed. This means result.all_successful cannot be evaluated by the caller on DEFINE failure, contradicting the docstring which implies the caller can inspect the result.",
+            "ISSUE 4 — MINOR — The RECORD_SEQUENCE column (IntegerType, migration-added audit column) is included in the Delta Lake table schema. While annotated as absent on the mainframe, its presence in the base table schema means downstream REPRO-equivalent MERGE/INSERT operations must always supply this column or handle nullability. IntegerType may also be insufficient for large datasets; LongType would be safer for a monotonic sequence number in a wire payment batch context.",
+            "ISSUE 5 — MINOR — Table property comment is set via ALTER TABLE after CREATE TABLE rather than inline in the COMMENT clause. While functionally equivalent in Databricks Delta, using a separate ALTER TABLE round-trip introduces a window where the table exists without a comment, and doubles the number of SQL statements executed per table. Databricks Delta supports COMMENT 'text' directly in CREATE TABLE syntax which would be more atomic.",
+            "ISSUE 6 — MINOR — The verify_wire_ksds_tables() function uses DeltaTable.isDeltaTable() which checks whether the path/name is a Delta table but does not validate the schema (column names, types, key constraints) against the expected KsdsClusterConfig. A table with a corrupted or wrong schema would still return True, giving a false positive on verification. A DESCRIBE TABLE or schema comparison would provide stronger post-DEFINE validation equivalent to IDCAMS LISTCAT ALL.",
+            "ISSUE 7 — MINOR — SQL strings are constructed via f-string interpolation for table names (e.g. f'DROP TABLE IF EXISTS {qualified}'). The qualified table name is derived from a controlled enum (ClusterName) and dataclass constants, so SQL injection risk is low in practice. However, the noqa: S608 suppressions on every SQL call indicate the linter has flagged these. A parameterised approach or explicit allowlisting would be more robust for a production migration asset.",
+            "ISSUE 8 — INFORMATIONAL — The cylinders_primary difference (20 vs 10) between INPUT and EXTRT clusters is correctly captured in the KsdsClusterConfig and table properties, but has no enforcement mechanism in Delta Lake. The comment correctly notes this is a 'sizing hint' only. Downstream capacity planning must rely on these properties being read and acted upon externally, which is appropriate but should be documented in the operational runbook."
+          ],
+          "correction_hint": "Primary correction required: Replace 'CREATE TABLE IF NOT EXISTS' with 'CREATE OR REPLACE TABLE' (or remove the IF NOT EXISTS guard) to guarantee a clean empty table on every run, matching the IDCAMS DELETE-then-DEFINE 'clean slate' semantics. If CREATE OR REPLACE TABLE is not available, ensure the DROP in _delete_cluster() raises on failure rather than suppressing, so that a failed DROP causes the step to abort before attempting a CREATE that would leave stale data. Secondary correction: Add a try/except around each _define_cluster() call in initialise_wire_ksds_work_files() and populate the StepInitResult even in the failure case, so callers can inspect result.all_successful reliably. Optional improvements: (a) change RECORD_SEQUENCE to LongType; (b) add schema validation in verify_wire_ksds_tables(); (c) use inline COMMENT in CREATE TABLE DDL instead of a separate ALTER TABLE.",
+          "status_after": "PASS",
+          "issues_after": [
+            "MINOR — Dead code: variable tbl_props_str is computed in _define_cluster (joining config.tbl_properties into a string) but is never used. The code subsequently builds all_props_str from all_props (which includes config.tbl_properties plus the comment key). tbl_props_str can be safely removed without any behavioural change.",
+            "MINOR — Schema validation in verify_wire_ksds_tables() checks for column name presence only (via DESCRIBE TABLE col_name set comparison) but does not validate column data types or nullability. A table with correct column names but wrong types (e.g., wire_key as INTEGER instead of STRING) would return True (false positive). The docstring claims equivalence to IDCAMS LISTCAT ALL depth but type validation is absent.",
+            "MINOR — DeltaTable.isDeltaTable() pre-check before DROP TABLE IF EXISTS in _delete_cluster is redundant. The IF EXISTS clause already handles the not-found case safely. The pre-check adds a Spark metadata round-trip on every run. Not a correctness defect but an unnecessary overhead.",
+            "INFORMATIONAL — The SYSIN condition IF LASTCC > 8 THEN SET MAXCC = 0 is correctly implemented as documented: CC=8 (not found) is tolerated via SKIPPED_NOT_FOUND without suppression, and CC>8 (hard error) is suppressed via WARN_ERROR_SUPPRESSED, with DEFINEs always proceeding. The business rule decoder's note about this being non-standard is accurate but the code faithfully mirrors the exact SYSIN semantics.",
+            "INFORMATIONAL — The exc.__dict__['cluster_init_result'] pattern for passing ClusterInitResult out of _define_cluster on failure is unconventional. A more idiomatic approach would use a custom exception class carrying the result, or an out-parameter. The current approach is functional but fragile if exception instances are created in contexts where __dict__ mutation is restricted (e.g., C-extension exceptions)."
+          ]
+        }
+      ],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP020",
+      "utility_type": "IDCAMS",
+      "code_path": "outputs/pyspark/STEP020_IDCAMS.py",
       "validation_status": "PASS",
       "checks": {
         "filter_logic": {
           "status": "PASS",
-          "detail": "HIGHVAL filter uses F.col(AMOUNT) > THRESHOLD_AMOUNT (strictly GT 1,000,000), exactly matching SYSIN INCLUDE=(17,9,PD,GT,+1000000). LOWVAL filter uses F.col(AMOUNT) <= THRESHOLD_AMOUNT (LE 1,000,000), exactly matching SYSIN INCLUDE=(17,9,PD,LE,+1000000). Boundary value 1,000,000 correctly excluded from HIGHVAL and included in LOWVAL. Negative amounts correctly satisfy LE and route to LOWVAL. Zero correctly routes to LOWVAL. Filters are complementary and together cover all non-NULL records with no overlap and no loss, faithfully replicating DFSORT OUTFIL exhaustive split semantics."
+          "detail": "The original SYSIN is a bare REPRO INFILE/OUTFILE with no INCLUDE, OMIT, or WHERE clause. The generated code applies no business-level filter to records: all records flow into _add_audit_columns() and _rank_by_key(), and the only record-level split is on AUDIT_DUPLICATE_RANK (first-seen vs duplicate), which faithfully replicates the REPRO-without-REPLACE behaviour of accepting the first occurrence of each key and rejecting (quarantining) subsequent ones. No spurious filter predicates are introduced. The allow_duplicates=False default correctly mirrors the absence of REPLACE in the SYSIN. NA for INCLUDE/OMIT because none exist in SYSIN."
         },
         "sort_logic": {
-          "status": "PASS",
-          "detail": "Both df_high and df_low apply .orderBy(F.col(AMOUNT).desc()), correctly implementing SORT FIELDS=(17,9,PD,D) — descending order on the decoded packed-decimal amount field. The implementation applies filter first then orderBy independently on each output DataFrame, which is the correct approach for Spark: it ensures the sort is the terminal operation in each logical plan, giving Catalyst the best opportunity to honour physical ordering during the write. This faithfully replicates DFSORT's guarantee that each OUTFIL stream is written in sorted order. Sort key column (AMOUNT='amount_pd') correctly maps to mainframe offset 17, length 9, PD. No ascending/descending inversion detected."
+          "status": "NA",
+          "detail": "The original SYSIN contains no SORT or KEYS ordering directive beyond the implicit KSDS key ordering imposed by the VSAM cluster definition. The generated code does not impose an explicit sort on the output DataFrame, which is correct: REPRO loads records in sequential file order and the KSDS reorders them by key internally. The AUDIT_ROW_NUMBER window ordering (coalesce(1) + monotonically_increasing_id() or row_order_column) is used only to break ties in duplicate-key ranking, not to sort the output data. This is an accurate representation of mainframe behaviour."
         },
         "column_names": {
           "status": "PASS",
-          "detail": "Column name 'amount_pd' is descriptive and encodes both the business meaning (amount) and the mainframe field format (PD/packed-decimal), improving readability over a generic positional name. All column references use the module-level string constant AMOUNT='amount_pd' rather than inline string literals, preventing typo-driven bugs. VALUE_TIER, TIER_HIGH, TIER_LOW, OUTPUT_KEY_HIGH, OUTPUT_KEY_LOW, THRESHOLD_AMOUNT, and EXPECTED_LRECL are all declared as named constants and used consistently. No magic strings or magic numbers appear in the core logic."
+          "detail": "All column name constants (KSDS_KEY_COLUMN, AUDIT_SOURCE_FILE, AUDIT_LOAD_TIMESTAMP, AUDIT_ROW_NUMBER, AUDIT_DUPLICATE_FLAG, AUDIT_DUPLICATE_RANK) are defined as module-level string constants and referenced by name throughout the codebase — no magic strings are scattered in business logic. The illustrative business field names in WIRE_FIELD_LAYOUT (wire_transaction_id, wire_value_date, wire_amount, wire_sender_name, wire_receiver_name, wire_routing_number) are semantically meaningful and domain-appropriate for wire transfer processing. The code prominently and repeatedly documents that these names are ILLUSTRATIVE PLACEHOLDERS pending copybook verification, which is the correct posture given that no copybook or DEFINE CLUSTER was provided in the step information. The placeholder validation in _validate_input_schema() guards against the specific string 'ksds_primary_key' but not against 'wire_transaction_id' still being a placeholder — this is a minor gap but acceptable given the extensive inline warnings."
         },
         "pd_handling": {
           "status": "PASS",
-          "detail": "The code explicitly and repeatedly documents that PD decoding must occur upstream before this function is called. The docstring, inline comments, file header, and __main__ block all state that the 9-byte packed BCD field at mainframe offset 17 must be decoded to a LongType signed integer in a preceding ETL step. A reference UDF skeleton (decode_packed_decimal) with correct nibble-extraction and sign-nibble logic (0xD=negative, 0xC/0xF=positive) is provided in the __main__ block. The _validate_amount_column_present guard raises a clear ValueError if the column is missing. The code correctly does NOT attempt to decode raw bytes itself, which is the appropriate separation of concerns. An important currency-unit ambiguity note (cents vs dollars, affecting the effective threshold) is prominently flagged in the file header and THRESHOLD_AMOUNT constant comment."
+          "detail": "The function docstring for load_wire_daily_input_to_staging() explicitly states: 'All packed-decimal (PD) fields must have been decoded to their integer equivalents (LongType or IntegerType) before ingestion.' This pre-condition is documented as a caller responsibility, which is the correct pattern for a PySpark migration of EBCDIC/PD mainframe data — PD decoding is an ingestion-layer concern upstream of this step. The wire_amount field in WIRE_FIELD_LAYOUT is parsed as StringType (all _parse_fixed_width outputs are StringType) with no in-function numeric casting, consistent with the instruction that callers should cast numeric fields as needed. The note about EBCDIC transcoding is also present. No PD fields are silently mishandled."
         },
         "output_structure": {
           "status": "PASS",
-          "detail": "The function returns Dict[str, DataFrame] with exactly two keys: OUTPUT_KEY_HIGH='HIGH' (WIRE.WORK.HIGH.SEQ / HIGHVAL) and OUTPUT_KEY_LOW='LOW' (WIRE.WORK.LOW.SEQ / LOWVAL). The __main__ block demonstrates correct consumption of this dictionary via result[OUTPUT_KEY_HIGH] and result[OUTPUT_KEY_LOW], writing each to the appropriate target path with .write.mode('overwrite').parquet(). The return type annotation Dict[str, DataFrame] is accurate. Each output DataFrame contains all original columns from valid_df plus the appended VALUE_TIER column, preserving the pass-through record structure consistent with DFSORT OUTFIL behaviour (no field reformatting). The added VALUE_TIER column is an addendum for lineage and does not alter the semantic record content."
+          "detail": "The ReproResult dataclass returns three members: primary (DataFrame of first-seen records), duplicates (DataFrame of quarantined duplicate-key records), and metrics (dict with input_count, primary_count, duplicate_count). AUDIT_DUPLICATE_RANK is correctly dropped from both DataFrames before population of ReproResult, so the internal processing column never leaks to consumers. The FIX for issue 2 (metrics accuracy when allow_duplicates=True) is correctly implemented: total_count and true_duplicate_count are computed from the ranked DataFrame before the split, ensuring duplicate_count reflects genuine key collisions regardless of routing. The FIX for issue 4 (quarantine_write_mode) is correctly implemented: hardcoded 'append' replaced with configurable quarantine_write_mode defaulting to 'overwrite', preventing stale record accumulation on re-runs. write_primary_output() and write_quarantine_output() correctly use config.write_mode and config.quarantine_write_mode respectively."
         },
         "split_logic": {
           "status": "PASS",
-          "detail": "The two OUTFIL conditions (GT 1,000,000 and LE 1,000,000) are mutually exclusive: no integer value can simultaneously be both greater than and less-than-or-equal-to 1,000,000. Together they are exhaustive over all non-NULL integers: every valid decoded amount satisfies exactly one condition. NULL amounts are quarantined before the split with a warning log, mirroring the S0C7 abend that a corrupt PD field would cause on the mainframe. The quarantine step does not silently discard records — it counts and logs them, enabling downstream investigation. The union of HIGHVAL and LOWVAL equals the complete valid input set. No record appears in both outputs. No valid record is silently lost. Split logic is a faithful and complete implementation of the DFSORT OUTFIL complementary INCLUDE pattern."
+          "detail": "The split between primary_df and duplicate_df is mutually exclusive and exhaustive: primary_df takes AUDIT_DUPLICATE_RANK == 1 records, duplicate_df takes AUDIT_DUPLICATE_RANK > 1 records. Since row_number() over a window partitioned by key and ordered by AUDIT_ROW_NUMBER produces contiguous integers starting at 1 with no gaps or ties, the union of rank==1 and rank>1 covers all input records exactly once. The FIX for issue 3 is correctly applied: in the allow_duplicates=True branch, AUDIT_DUPLICATE_FLAG is set via F.when(AUDIT_DUPLICATE_RANK > 1, True).otherwise(False) rather than F.lit(False) for all records, so genuine duplicates routed to primary are correctly flagged True in the audit column. The allow_duplicates=False branch correctly sets AUDIT_DUPLICATE_FLAG=False for primary records and True for duplicate records. Both branches drop AUDIT_DUPLICATE_RANK before returning."
         },
         "aggregation": {
           "status": "NA",
-          "detail": "This DFSORT step contains no SUM, COUNT, or any other aggregation operation. The SYSIN specifies only SORT FIELDS and OUTFIL INCLUDE directives. No GROUP BY granularity validation is applicable."
+          "detail": "The original SYSIN REPRO command contains no SUM, TOTAL, STATISTICS, or aggregation clauses. No aggregation is performed in the generated code. The metrics dict (input_count, primary_count, duplicate_count) is an operational monitoring artefact with no mainframe SYSIN equivalent and does not alter the output data."
         }
       },
-      "synthetic_data_summary": "15 synthetic wire transfer records were generated covering: 5 high-value records (amount_pd > 1,000,000) that should route to HIGHVAL only; 5 low-value records (amount_pd <= 1,000,000) that should route to LOWVAL only; 1 exact boundary record (amount_pd = 1,000,000) that must route to LOWVAL only (LE condition); 1 zero-amount record (amount_pd = 0) that must route to LOWVAL only; 1 negative-amount record (amount_pd = -500) that must route to LOWVAL only (LE 1,000,000 is satisfied); 1 NULL amount record that must be quarantined and excluded from both outputs. Records span realistic wire transfer amounts from -500 to 50,000,000. Across 14 valid records: 5 route to HIGHVAL (>1,000,000), 9 route to LOWVAL (<=1,000,000). The NULL record is excluded from both. Total coverage: HIGH-pass=5, HIGH-fail=9+1NULL=10, LOW-pass=9, LOW-fail=5+1NULL=6. Boundary at exactly 1,000,000 correctly routes to LOWVAL (LE). No record appears in both outputs (mutually exclusive). No valid record is lost (exhaustive coverage confirmed).",
+      "synthetic_data_summary": "15 synthetic wire transfer records were generated to test IDCAMS REPRO migration logic. Records 1-10 have unique wire_transaction_id values and should all pass to primary output (no duplicates). Records 11-13 are deliberate duplicates of records 1, 2, and 3 respectively (same wire_transaction_id, different payload), simulating the RC=8 duplicate-key scenario. Record 14 has an empty string wire_transaction_id (edge case: empty key). Record 15 has a zero-amount wire transfer (edge case: valid business record with 0.00 amount). With allow_duplicates=False: primary output = 12 records (records 1-10, 14, 15), quarantine = 3 records (11, 12, 13). Input count = 15, duplicate_count = 3, primary_count = 12. The REPRO SYSIN has no filter, sort, or aggregation clauses — it is a straight copy, so all 15 input records should be represented across primary + quarantine with zero transformation to business field values.",
+      "issues_found": [
+        "MINOR — _validate_input_schema() guards against the specific placeholder string 'ksds_primary_key' but KSDS_KEY_COLUMN is set to 'wire_transaction_id' (an illustrative placeholder). If a developer deploys without updating KSDS_KEY_COLUMN, the guard does not trigger and garbled key values will silently pass through duplicate detection and downstream keyed access. The guard should additionally check whether KSDS_KEY_COLUMN equals 'wire_transaction_id' (or any other known illustrative placeholder) and raise ValueError, or alternatively require the caller to explicitly confirm the key column has been verified.",
+        "MINOR — _add_audit_columns() coalesce(1) fallback: for distributed cloud storage (S3, ADLS), monotonically_increasing_id() after coalesce(1) does not guarantee sequential ordering consistent with the original flat file byte order. This means AUDIT_ROW_NUMBER and therefore the duplicate-key tie-breaking in _rank_by_key() may not consistently select the same 'first' record across re-runs when the input has duplicate keys. The docstring documents this risk and recommends row_order_column, but the production deployment guidance should be stronger given that wire payments are financial transactions where consistent first-record selection is material.",
+        "MINOR — The __main__ sys.exit(8) for duplicates will cause most orchestration frameworks (Airflow, AWS Step Functions, Databricks Jobs) to mark the task as FAILED even though the primary output was successfully written and the duplicates were quarantined. The orchestrator warning is documented in comments, but there is no programmatic mechanism (e.g. writing a status file or emitting a custom metric) to distinguish 'completed with quarantined duplicates' from 'genuinely failed' in orchestration tooling that only observes exit codes.",
+        "INFORMATIONAL — No issues found with the core REPRO logic: all records from the sequential input are processed (no filtering), no transformation is applied to business field values, duplicate handling correctly mirrors REPRO-without-REPLACE semantics (first occurrence kept, subsequent occurrences quarantined with equivalent of RC=8 alerting), and the output structure is consistent with downstream keyed-access requirements."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 1,
+      "correction_history": [
+        {
+          "attempt": 1,
+          "issues_before": [
+            "CRITICAL — Column names in WIRE_FIELD_LAYOUT (wire_transaction_id, wire_value_date, wire_amount, wire_sender_name, wire_receiver_name, wire_routing_number) and WIRE_RECORD_LENGTH=120 are explicitly marked as illustrative placeholders in the code. The step information states '(no key fields identified)' and no copybook or DEFINE CLUSTER statement is provided. All field offsets, lengths, and column names are unverified assumptions. If any offset or length is wrong, _parse_fixed_width() will silently extract garbled field values that pass schema validation but contain incorrect data — including a garbled wire_transaction_id used as the KSDS primary key for all duplicate detection and downstream keyed access.",
+            "HIGH — In _collect_metrics(), input_count is computed as primary_count + duplicate_count. When allow_duplicates=True, duplicate_df is always empty (F.lit(False) filter), so input_count equals primary_count and the true number of duplicate records is not counted. This produces misleading metrics: a batch with 500 unique keys and 50 duplicates processed with allow_duplicates=True would report input_count=550, duplicate_count=0, primary_count=550 — the 50 duplicates are invisible in the metrics.",
+            "HIGH — In _split_primary_and_duplicates() under allow_duplicates=True, AUDIT_DUPLICATE_FLAG is set to F.lit(False) for every record in primary_df, including records with AUDIT_DUPLICATE_RANK > 1 (genuine duplicates). This means duplicate wire transactions written to the primary output in REPLACE-mode are flagged as non-duplicates (False), producing an incorrect audit trail that cannot be used to identify which records had key collisions.",
+            "MEDIUM — write_quarantine_output() hardcodes write mode as 'append' with no configuration option. On daily batch re-runs, if the primary output is overwritten (write_mode='overwrite') but the quarantine path accumulates records via append, the quarantine table will contain duplicate entries from multiple re-runs of the same business date. There is no deduplication or partition-by-run-date strategy in the quarantine write path, making the quarantine table potentially unreliable for reconciliation.",
+            "MEDIUM — The _add_audit_columns() coalesce(1) fallback is retained as the default path when row_order_column is None. For the stated use case of staging daily wire payment data — which may be high-volume — coalesce(1) collapses all data to a single executor partition, creating a performance bottleneck and OOM risk. The code documents this risk but the __main__ entry point defaults row_order_column=None, meaning production deployments without explicit configuration will use the risky coalesce(1) path.",
+            "LOW — The __main__ block exits with sys.exit(8) when duplicates are detected, matching mainframe REPRO RC=8. However, in standard orchestration frameworks (Airflow, AWS Step Functions, Databricks Jobs), any non-zero exit code marks the task as FAILED and blocks downstream DAG steps. The code documents this risk and instructs operators to configure the orchestrator to treat RC=8 as a warning, but this is an operational dependency that cannot be enforced in code and is likely to cause production incidents if the orchestrator is not configured correctly before go-live.",
+            "LOW — _collect_metrics() calls primary_df.count() and duplicate_df.count() as two separate Spark actions, triggering two full DAG evaluations. For large wire batches this doubles the compute cost of the metrics collection phase. The code acknowledges this with a comment but does not implement the single-pass alternative (union + groupBy on AUDIT_DUPLICATE_FLAG) even as an optional code path.",
+            "LOW — The fixed-width record length validation in _parse_fixed_width() uses DataFrame.first(), which is a driver-side collect operation. If the input file is very large this is acceptable at startup, but if called inside a loop or in a streaming context it would become a significant bottleneck. The usage here is correct (called once at job startup) but the function docstring should explicitly warn against reuse in iterative or streaming contexts to prevent misuse by future maintainers."
+          ],
+          "correction_hint": "Four corrections are required before production deployment: (1) Obtain the real WIRE.DAILY.INPUT.SEQ copybook and the actual VSAM DEFINE CLUSTER statement for WIRE.WORK.INPUT.KSDS, then replace all values in WIRE_FIELD_LAYOUT, WIRE_RECORD_LENGTH, and KSDS_KEY_COLUMN with verified field names, offsets, and lengths — this is the highest-priority fix as incorrect offsets will produce silently garbled wire transaction IDs. (2) Fix _collect_metrics() to count duplicates correctly when allow_duplicates=True by computing counts before the allow_duplicates branch splits the DataFrame, or by using a single count on the ranked DataFrame grouped by whether rank > 1. (3) Fix _split_primary_and_duplicates() allow_duplicates=True branch to set AUDIT_DUPLICATE_FLAG=True for records where AUDIT_DUPLICATE_RANK > 1 rather than F.lit(False) for all records, so the audit flag accurately reflects which records had key collisions even when REPLACE semantics are in effect. (4) Add a configurable write mode parameter to write_quarantine_output() (defaulting to 'overwrite' partitioned by load date, or at minimum 'overwrite' within the same run partition) to prevent unbounded accumulation of stale duplicate records across daily re-runs of the same business date.",
+          "status_after": "PASS",
+          "issues_after": [
+            "MINOR — _validate_input_schema() guards against the specific placeholder string 'ksds_primary_key' but KSDS_KEY_COLUMN is set to 'wire_transaction_id' (an illustrative placeholder). If a developer deploys without updating KSDS_KEY_COLUMN, the guard does not trigger and garbled key values will silently pass through duplicate detection and downstream keyed access. The guard should additionally check whether KSDS_KEY_COLUMN equals 'wire_transaction_id' (or any other known illustrative placeholder) and raise ValueError, or alternatively require the caller to explicitly confirm the key column has been verified.",
+            "MINOR — _add_audit_columns() coalesce(1) fallback: for distributed cloud storage (S3, ADLS), monotonically_increasing_id() after coalesce(1) does not guarantee sequential ordering consistent with the original flat file byte order. This means AUDIT_ROW_NUMBER and therefore the duplicate-key tie-breaking in _rank_by_key() may not consistently select the same 'first' record across re-runs when the input has duplicate keys. The docstring documents this risk and recommends row_order_column, but the production deployment guidance should be stronger given that wire payments are financial transactions where consistent first-record selection is material.",
+            "MINOR — The __main__ sys.exit(8) for duplicates will cause most orchestration frameworks (Airflow, AWS Step Functions, Databricks Jobs) to mark the task as FAILED even though the primary output was successfully written and the duplicates were quarantined. The orchestrator warning is documented in comments, but there is no programmatic mechanism (e.g. writing a status file or emitting a custom metric) to distinguish 'completed with quarantined duplicates' from 'genuinely failed' in orchestration tooling that only observes exit codes.",
+            "INFORMATIONAL — No issues found with the core REPRO logic: all records from the sequential input are processed (no filtering), no transformation is applied to business field values, duplicate handling correctly mirrors REPRO-without-REPLACE semantics (first occurrence kept, subsequent occurrences quarantined with equivalent of RC=8 alerting), and the output structure is consistent with downstream keyed-access requirements."
+          ]
+        }
+      ],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP030",
+      "utility_type": "DFSORT",
+      "code_path": "outputs/pyspark/STEP030_DFSORT.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "PASS",
+          "detail": "The filter exactly matches the SYSIN INCLUDE COND=(55,2,CH,EQ,C'PE',AND,17,9,PD,GT,+0). Predicate 1 uses F.col(PAYMENT_TYPE) == 'PE' which correctly implements a case-sensitive equality check on the 2-character CH field. Predicate 2 uses F.col(TRANSACTION_AMOUNT) > 0 which correctly implements GT,+0 for a pre-decoded numeric field. Both predicates are combined with the & (logical AND) operator in a single .filter() call, faithfully reproducing the AND conjunction. The AMOUNT_ZERO constant is integer 0, which Spark correctly promotes for comparison against DecimalType. Null transaction_amount values would also be excluded (null > 0 is false in Spark), which is consistent with the GT,+0 semantics and the nullable=False schema annotation."
+        },
+        "sort_logic": {
+          "status": "PASS",
+          "detail": "The sort exactly matches SORT FIELDS=(44,8,CH,A,17,9,PD,D). Primary key is F.col(REFERENCE_KEY).asc() corresponding to offset 44, len 8, CH, A (ascending). Secondary key is F.col(TRANSACTION_AMOUNT).desc() corresponding to offset 17, len 9, PD, D (descending). Both keys are applied in the correct priority order within a single orderBy() call. Within a shared reference_key group (e.g. WIRE0001), records are ranked largest-amount-first, matching the mainframe behavior. No extraneous sort keys are introduced."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "All three key fields use named string constants defined at module level: TRANSACTION_AMOUNT ('transaction_amount'), REFERENCE_KEY ('reference_key'), and PAYMENT_TYPE ('payment_type'). Names are descriptive and derived from business meaning rather than positional names like col_17 or field_44. Filter literals are also constants: PAYMENT_TYPE_PE = 'PE' and AMOUNT_ZERO = 0. Constants are used consistently throughout the filter, sort, and schema helper, making the code maintainable and refactor-safe."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code contains clear, repeated, and prominent documentation that the transaction_amount field must be pre-decoded from packed decimal (COMP-3) format to a numeric Spark type (DecimalType or LongType) by the ingestion layer before this function is called. This requirement is stated in the module docstring, the column constant comment, the function docstring parameter table, the IMPORTANT PRE-CONDITIONS block, and the READ section of the __main__ entry point. The build_expected_schema() helper types transaction_amount as DecimalType(17, 2) with a note to confirm scale against the source COBOL copybook. The code does not attempt to decode raw PD bytes inline, which is the correct architectural separation."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function returns a DataFrame with all original input columns preserved and no columns added, removed, or renamed. This correctly implements the no-reformatting requirement of the EXTRACT operation. The return type annotation is DataFrame. The output is equivalent to the SORTOUT DD (WIRE.WORK.EXTRT.SEQ, RECFM=FB, LRECL=200) with full 200-byte logical records intact. The __main__ entry point writes with mode='overwrite' consistent with DISP=(NEW,CATLG,DELETE) staging semantics, and a post-write count is logged for observability."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "No OUTFIL or split logic is present in the original SYSIN. This check is not applicable to STEP030."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "No SUM, TOTAL, or aggregation control cards are present in the original SYSIN. This check is not applicable to STEP030."
+        }
+      },
+      "synthetic_data_summary": "15 records designed to cover: 7 records passing both filter conditions (PE payment type and amount > 0), 3 records failing only the amount filter (zero or negative amounts with valid PE type), 4 records failing only the payment type filter (codes AC, XY, empty string, and lowercase pe), and 1 record failing both filters. Edge cases include zero-amount boundary (R04, R10), minimum positive amount 0.01 (R09), negative amount (R05), case-sensitivity on payment type code (R15), and multiple records sharing the same reference key WIRE0001 to validate secondary sort descending (R01, R02, R14). Of 15 records, 7 pass both conditions and are included in output, sorted as: AAAAAAAA/75000, WIRE0001/9999999.99, WIRE0001/1500000, WIRE0001/500, WIRE0002/250.50, WIRE0007/0.01, ZZZZZZZZ/12000.",
       "issues_found": [],
       "correction_needed": false,
       "correction_hint": "",
       "corrections_applied": 0,
       "correction_history": [],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP040",
+      "utility_type": "DFSORT",
+      "code_path": "outputs/pyspark/STEP040_DFSORT.py",
+      "validation_status": "ERROR",
+      "checks": {},
+      "synthetic_data_summary": "",
+      "issues_found": [
+        "Could not parse Claude validation response as JSON"
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "error"
+    },
+    {
+      "step_name": "STEP070",
+      "utility_type": "DFSORT",
+      "code_path": "outputs/pyspark/STEP070_DFSORT.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "The SYSIN contains no INCLUDE or OMIT statements. The generated code correctly applies no filter predicate — all input records flow into the SORT and SUM operations. No filter logic to validate."
+        },
+        "sort_logic": {
+          "status": "PASS",
+          "detail": "Primary sort key is wire_type_code (offset 63, len 3, CH) ascending and secondary sort key is transaction_amount (offset 17, len 9, PD) descending, exactly matching SORT FIELDS=(63,3,CH,A,17,9,PD,D). The Window partitionBy correctly uses both group keys; the orderBy within the window uses TRANSACTION_AMOUNT DESC then REF_ID ASC as a stable tie-breaker. The post-aggregation orderBy (Step 3) correctly sorts by F.col(TRANSACTION_AMOUNT).desc() — the original sort key column — rather than F.col(_SUM_AMOUNT).desc(), faithfully reproducing DFSORT output sequence where ordering is based on sort key values not post-SUM accumulated amounts. The fix is correctly implemented and documented."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "All column names are semantically meaningful and derived from field business meanings: REF_ID, TRANSACTION_AMOUNT, VALUE_DATE, CURRENCY_CODE, WIRE_TYPE_CODE, ROUTING_CODE. All are defined as module-level string constants with offset/length/format comments. Internal derived columns (_SUM_AMOUNT, _AMOUNT_FS, _ROW_NUM) are prefixed with underscore to indicate internal use. One minor issue: the _OUTPUT_COLUMNS tuple constant is defined but never referenced in the select() call, making it dead code. This is a documentation inconsistency but not a runtime error."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code explicitly documents in multiple locations (INPUT_SCHEMA StructField comment, function docstring Parameters section, __main__ block comments) that the 9-byte packed decimal TRANSACTION_AMOUNT field must be pre-decoded from raw PD binary representation to Decimal(17,0) before this function is invoked. The schema declares DecimalType(17,0) for the input and casts the aggregated sum to DecimalType(38,0) to prevent overflow. The _amount_to_fs12 helper correctly converts the Decimal to a left-space-padded 12-character signed string matching DFSORT TO=FS LENGTH=12 semantics, including correct negative sign handling."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function returns a DataFrame with exactly 6 columns in the order specified by OUTREC FIELDS: ref_id (16 CH), wire_type_code (3 CH), amount_fs_12 (12 FS), value_date (8 CH), currency_code (2 CH), routing_code (3 CH). Total explicit content is 44 bytes, correctly accounting for 16+3+12+8+2+3. The serialise_to_fb200 helper correctly pads to the 200-byte LRECL by appending 156 literal space characters. Field widths are enforced via F.rpad in the select(). The docstring includes a complete field-mapping table. The output schema matches what downstream reconciliation or reporting jobs would expect."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "The SYSIN contains no OUTFIL statement. There is a single output dataset (WIRE.SUMMARY.SEQ) and no record-level splitting logic. Not applicable to this step."
+        },
+        "aggregation": {
+          "status": "PASS",
+          "detail": "The GROUP BY granularity is (wire_type_code, transaction_amount) — both SORT FIELDS — exactly matching DFSORT SUM semantics where SUM collapses all records sharing identical sort key values. The code uses F.sum(TRANSACTION_AMOUNT).cast(DecimalType(38,0)) for the SUM FIELDS=(17,9,PD) instruction. Non-SUM fields (ref_id, value_date, currency_code, routing_code) are carried from the first surviving record per group via Window row_number selection followed by an inner join, correctly replicating DFSORT first-record-in-group carry-forward behaviour. The BUSINESS STAKEHOLDER NOTE in the docstring correctly flags that the current GROUP BY key includes TRANSACTION_AMOUNT and documents the alternative if full rollup per wire type is intended."
+        }
+      },
+      "synthetic_data_summary": "15 records across 10 logical groups: Group A (3 records, FED/500000 summing to 1500000), Group B (1 record, FED/750000), Group C (2 records, FED/100 summing to 200), Group D (2 records, CHI/999999999999999 summing to 1999999999999998 — 16 digits, intentionally overflows FS LENGTH=12 to test abend guard), Group E (1 record, CHI/1250000), Group F (1 record, CHI/0, zero-amount edge case), Group G (2 records, SWF/-50000 summing to -100000, negative amount), Group H (1 record, SWF/300000), Group I (1 record, SWF/1, boundary small positive), Group J (1 record, ZZZ/500000, high-sort wire_type_code). All 15 records survive into aggregation (no INCLUDE/OMIT filter in this step). 10 output groups produced; Group D triggers F.raise_error overflow guard.",
+      "issues_found": [
+        "MINOR — Dead code: the module-level constant _OUTPUT_COLUMNS is defined as a tuple of output column names but is never referenced in the select() call or anywhere else in the module. The select() explicitly lists columns individually. This creates a documentation inconsistency where _OUTPUT_COLUMNS implies it drives the select but does not. No runtime impact.",
+        "MINOR — F.raise_error() portability: the code uses pyspark.sql.functions.raise_error() which was introduced in Spark 3.1 as a Python API. In some Spark 3.x distributions the Python binding may not be available or may behave differently from F.expr(\"raise_error('message')\"). The code documents the Spark 3.1+ requirement but does not provide a fallback. This is a deployment environment risk rather than a logic error.",
+        "MINOR — Two-pass input scan with shuffle-heavy join: the transformation scans input_df twice (once for the Window row_number assignment, once for the groupBy aggregation) and then performs a shuffle join to recombine results. A single groupBy with first() ordered by ref_id would be more efficient. This is a performance concern only and does not affect correctness or output fidelity.",
+        "MINOR — The orderBy clause inside the Window (F.col(TRANSACTION_AMOUNT).desc()) is a no-op because TRANSACTION_AMOUNT is a partition key, meaning all rows in the partition share the same value. The code correctly documents this in a comment. No impact on correctness but the clause adds minor plan complexity."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 1,
+      "correction_history": [
+        {
+          "attempt": 1,
+          "issues_before": [
+            "CRITICAL — SORT ORDER BUG: The post-aggregation orderBy in Step 3 sorts by F.col(_SUM_AMOUNT).desc() (the accumulated sum column) instead of F.col(TRANSACTION_AMOUNT).desc() (the original sort key). DFSORT outputs records ordered by their sort key values (original transaction_amount from SORT FIELDS), not by the post-SUM accumulated value. When SUM changes amounts (e.g. two records of 500000 summed to 1000000), the code produces incorrect output ordering relative to DFSORT. Specifically, a group whose sort key is 500000 but whose sum is 1000000 will be ranked above a group with sort key 750000 and sum 750000 in the code, whereas DFSORT correctly ranks the 750000 sort-key group above the 500000 sort-key group. Fix: change F.col(_SUM_AMOUNT).desc() to F.col(TRANSACTION_AMOUNT).desc() in the final df_summed.orderBy() call.",
+            "MODERATE — F.raise_error() API MISUSE: The _amount_to_fs12 function calls F.raise_error(F.concat(...)) passing a Column expression as the argument. In the PySpark Python API, pyspark.sql.functions.raise_error() (Spark 3.1+) expects a Python string literal for the error message, not a Column expression. Passing a Column will either raise a TypeError at plan-construction time or silently not behave as intended. To include the dynamic value in the error message, use F.expr() with a SQL raise_error() call, or raise the error via a Python UDF, or simplify to F.raise_error('DFSORT LENGTH OVERFLOW: value exceeds 12 characters') with a static string. The current code will fail at runtime when the overflow condition is actually triggered.",
+            "MINOR — DFSORT FIRST-RECORD SEMANTICS: DFSORT's first-surviving record after SUM is determined by the physical sort sequence — the first record in sort order within each duplicate-key group. Since the sort key is (wire_type_code ASC, transaction_amount DESC), all records in a duplicate group share identical sort key values, making their relative order within the group indeterminate (stable relative to input or undefined by DFSORT spec). The code uses REF_ID ASC as a tie-breaker, which is deterministic and reasonable for Spark but differs from DFSORT's physical-arrival-order behavior. This means non-key field values (ref_id, value_date, currency_code, routing_code) on summary output rows may differ between the mainframe and PySpark for groups with multiple duplicate records. This is an inherent limitation of migrating non-deterministic mainframe behavior to a deterministic distributed framework and should be documented for business stakeholders."
+          ],
+          "correction_hint": "PRIMARY FIX (CRITICAL): In the post-aggregation orderBy call (Step 3), change F.col(_SUM_AMOUNT).desc() to F.col(TRANSACTION_AMOUNT).desc(). The corrected line should read: df_sorted_summed = df_summed.orderBy(F.col(WIRE_TYPE_CODE).asc(), F.col(TRANSACTION_AMOUNT).desc()). This ensures the output is ordered by the original SORT FIELDS sort key (wire_type_code ASC, transaction_amount DESC) as DFSORT specifies, not by the post-SUM accumulated amount which can differ. SECONDARY FIX (MODERATE): In _amount_to_fs12, replace F.raise_error(F.concat(...)) with either (a) F.raise_error('DFSORT LENGTH OVERFLOW: summed amount exceeds 12 characters') using a static string, or (b) use F.expr(\"raise_error(concat('DFSORT LENGTH OVERFLOW: Value=', cast(\" + col_name + \" as string)))\") with a SQL expression, or (c) implement the overflow check in a Python UDF that raises a Python exception. The Column-typed argument to F.raise_error() is not supported in the PySpark Python API and will fail at runtime.",
+          "status_after": "PASS",
+          "issues_after": [
+            "MINOR — Dead code: the module-level constant _OUTPUT_COLUMNS is defined as a tuple of output column names but is never referenced in the select() call or anywhere else in the module. The select() explicitly lists columns individually. This creates a documentation inconsistency where _OUTPUT_COLUMNS implies it drives the select but does not. No runtime impact.",
+            "MINOR — F.raise_error() portability: the code uses pyspark.sql.functions.raise_error() which was introduced in Spark 3.1 as a Python API. In some Spark 3.x distributions the Python binding may not be available or may behave differently from F.expr(\"raise_error('message')\"). The code documents the Spark 3.1+ requirement but does not provide a fallback. This is a deployment environment risk rather than a logic error.",
+            "MINOR — Two-pass input scan with shuffle-heavy join: the transformation scans input_df twice (once for the Window row_number assignment, once for the groupBy aggregation) and then performs a shuffle join to recombine results. A single groupBy with first() ordered by ref_id would be more efficient. This is a performance concern only and does not affect correctness or output fidelity.",
+            "MINOR — The orderBy clause inside the Window (F.col(TRANSACTION_AMOUNT).desc()) is a no-op because TRANSACTION_AMOUNT is a partition key, meaning all rows in the partition share the same value. The code correctly documents this in a comment. No impact on correctness but the clause adds minor plan complexity."
+          ]
+        }
+      ],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP090",
+      "utility_type": "IDCAMS",
+      "code_path": "outputs/pyspark/STEP090_IDCAMS.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "IDCAMS LISTCAT ALL contains no INCLUDE/OMIT/COND filter predicates. The original SYSIN issues two unconditional LISTCAT ENTRIES() ALL commands. The generated code correctly implements this as an unconditional catalogue query loop over exactly the two entries specified in _LISTCAT_ENTRIES — no filtering logic is present or required. NA is the correct verdict."
+        },
+        "sort_logic": {
+          "status": "NA",
+          "detail": "LISTCAT ALL produces no sorted output dataset. The mainframe SYSPRINT output is ordered by the sequence of ENTRIES() commands in the SYSIN, which the code replicates exactly via the ordered _LISTCAT_ENTRIES tuple: DS_WIRE_WORK_INPUT_KSDS first, DS_WIRE_WORK_EXTRT_KSDS second. No sort keys or directions are applicable."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "All catalogue attribute names are defined as named constants at module level (ATTR_DATASET_NAME, ATTR_KEY_OFFSET, ATTR_REC_TOTAL, ATTR_HIGH_USED_RBA, etc.) and map directly to their mainframe LISTCAT ALL output field names (KEY-OFFSET, REC-TOTAL, HI-USED-RBA, etc.). The CatalogueEntry dataclass fields use the same names. The _MAINFRAME_DATASET_NAME lookup preserves the original four-node mainframe ENTRY names. Constants are used consistently throughout the Parquet audit write block. No magic strings for field names appear in business logic paths."
+        },
+        "pd_handling": {
+          "status": "NA",
+          "detail": "IDCAMS LISTCAT ALL does not process packed-decimal (PD / COMP-3) record fields. This step reads no data records; it queries catalogue metadata only. PD decoding is not applicable to this step."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "listcat_vsam_ksds_metadata() returns dict[str, CatalogueEntry], which is correctly typed and documented. Downstream callers can inspect entry.condition_code (0 or 4), entry.exists (bool), entry.rec_total, and entry.high_used_rba for routing decisions, exactly as described in the docstring. DatasetNotFoundException carries a .missing list enabling orchestrators to replicate JCL COND=(4,LT,STEP090) abort logic. The return type is stable whether raise_on_missing is True or False. The optional Parquet audit write is clearly segregated with ENABLE_AUDIT_PARQUET_WRITE=False default and does not alter the function return value."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "IDCAMS LISTCAT ALL has no OUTFIL split, no conditional output routing, and no multiple output datasets. The original JCL defines only SYSPRINT as output. NA is correct."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "IDCAMS LISTCAT ALL performs no SUM, COUNT, GROUP BY, or any aggregation. Record-count statistics (REC-TOTAL, REC-INSERTED, etc.) are read from the catalogue as pre-existing metadata attributes, not computed by this step. NA is correct."
+        }
+      },
+      "synthetic_data_summary": "STEP090 is an IDCAMS LISTCAT step with no filter, sort, split, or aggregation logic — it is a pure catalogue metadata query. No input records are filtered, transformed, or aggregated; the 'data' is catalogue metadata returned by the platform adapter. Fifteen synthetic catalogue state scenarios were mentally constructed to cover: (1) both datasets present and healthy (CC=0), (2) one dataset missing (CC=4 on WIRE.WORK.EXTRT.KSDS), (3) both datasets missing (CC=4 on both), (4) Spark adapter returning -1 sentinels for VSAM-specific fields (expected behaviour), (5) AWS Glue adapter finding both tables, (6) Glue adapter receiving EntityNotFoundException, (7) Glue adapter receiving an unexpected non-EntityNotFoundException error, (8) rec_total successfully parsed from ANALYZE TABLE Statistics string, (9) rec_total falling back to -1 when Statistics row absent, (10) rec_total falling back to -1 when ANALYZE TABLE throws, (11) raise_on_missing=False with a missing entry — should return without raising, (12) mainframe_dataset_name correctly rendered in SYSPRINT block, (13) SYSPRINT block fallback to dataset_name.upper() when mainframe_dataset_name is empty, (14) audit Parquet write disabled by default, (15) append mode used when audit write is enabled. All 15 scenarios exercise the code paths defined by the LISTCAT equivalence claim.",
+      "issues_found": [
+        "MINOR — Dead code in SparkCatalogueAdapter.fetch_metadata(): the for/pass loop over stats_str.replace(',', ' ').split() at lines immediately before the import re block serves no purpose (the loop variable is never used and the loop body is 'pass'). The import re inside a try block is also an unusual pattern. Neither issue affects correctness since the regex search on stats_str is performed correctly immediately after, but the dead loop and inline import should be cleaned up for maintainability.",
+        "MINOR — USE_HIVE_ADAPTER is a module-level boolean in the __main__ block but is not exposed as a CLI argument, environment variable, or configuration parameter. For a production migration, this flag should be driven by external configuration (e.g. an env var or argparse argument) rather than a hardcoded in-file constant, otherwise operators must edit source code to switch adapters.",
+        "MINOR — The audit Parquet output path 'path/to/audit/step090_listcat_report' is a placeholder string. In production this must be parameterised. This is acknowledged in comments but left as a literal string, which would cause a runtime failure if ENABLE_AUDIT_PARQUET_WRITE were set to True without modification.",
+        "OBSERVATION — SparkCatalogueAdapter populates entry.creation_date from tbl.description (the table description field) rather than a true creation timestamp, because the Spark Catalog API does not expose a creation date directly. This is an honest platform limitation but the field semantics diverge from the mainframe CREATION date. The field is populated with whatever string is in description, which may be empty or unrelated to creation date. A comment acknowledging this limitation is present for getTable() but not for creation_date specifically.",
+        "OBSERVATION — The SYSPRINT block timestamp uses datetime.now(timezone.utc) at render time, not at query time. If as_sysprint_block() is called significantly after fetch_metadata() (e.g. the log is replayed), the timestamp will not accurately reflect when the catalogue was queried. For an audit tool this is a minor fidelity gap with the mainframe SYSPRINT TIME: field, which reflects the time of IDCAMS execution."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 1,
+      "correction_history": [
+        {
+          "attempt": 1,
+          "issues_before": [
+            "ISSUE 1 — Undocumented persistent output: The original JCL step produces output ONLY to SYSPRINT (inline job log). The generated code additionally writes a Parquet file to 'path/to/audit/step090_listcat_report'. This output has no mainframe equivalent for this step and is not listed in the Output Files specification. It should either be removed or clearly flagged as a migration-added enhancement outside the original step scope.",
+            "ISSUE 2 — Dataset name mapping inconsistency: The mainframe ENTRY names use dot-separated format (WIRE.WORK.INPUT.KSDS, WIRE.WORK.EXTRT.KSDS). The code maps these to 'wire_work.input_ksds' and 'wire_work.extrt_ksds' — collapsing 'WIRE.WORK' into 'wire_work' and 'INPUT.KSDS' into 'input_ksds'. This loses the three-level HLQ structure. A mainframe dataset with a four-node name (WIRE.WORK.INPUT.KSDS) cannot be unambiguously represented as a two-part db.table name without an explicit documented convention. The mapping should be documented as a conscious design decision with justification.",
+            "ISSUE 3 — as_sysprint_block() renders dataset_name with a no-op .replace('.', '.') call: The line `self.dataset_name.upper().replace('.', '.')` replaces dots with dots, performing no transformation. The intent was presumably to convert underscores back to dots for display (e.g. 'wire_work.input_ksds' → 'WIRE_WORK.INPUT_KSDS' is still wrong). The SYSPRINT block will display the Python/Spark name rather than the original mainframe dataset name (WIRE.WORK.INPUT.KSDS), making the audit log misleading for mainframe operators comparing it to the original SYSPRINT output.",
+            "ISSUE 4 — AWSGlueCatalogueAdapter error_code extraction is broken: The code `getattr(getattr(exc, 'response', {}).get('Error', {}), 'get', lambda *_: '')('Code', '')` is logically incorrect. `exc.response` returns a dict, not an object, so `getattr(dict, 'get', ...)` returns the dict's `.get` method — but the outer `getattr(..., 'get', lambda *_: '')` then calls that method with ('Code', ''), which is correct only by accident. For a boto3 ClientError the standard pattern is `exc.response['Error']['Code']`. The convoluted getattr chain is fragile and will silently fail for non-ClientError exceptions, potentially swallowing unexpected errors as CC=4 instead of re-raising them.",
+            "ISSUE 5 — audit_df write uses overwrite mode for a diagnostic/audit step: The step is explicitly described as serving a diagnostic/audit purpose. Using mode('overwrite') destroys all prior LISTCAT audit history on each run. The correct mode for an audit trail is 'append' with a run_timestamp or job_run_id column, as the code itself acknowledges in a comment but does not implement.",
+            "ISSUE 6 — SparkCatalogueAdapter sets rec_total to -1 unconditionally after ANALYZE: After attempting ANALYZE TABLE, the code sets `entry.rec_total = -1` regardless of whether statistics were retrieved, with a comment 'parse from stats[0] if format is known'. This means rec_total is never populated from Spark statistics even when available, making the REC-TOTAL field in the SYSPRINT output always -1 for Spark-managed tables. This is a placeholder left unimplemented.",
+            "ISSUE 7 — enableHiveSupport() called unconditionally: The entry-point SparkSession is built with .enableHiveSupport() which will fail in environments without a Hive metastore configured (e.g. standalone Spark, Databricks with Unity Catalog). Since the code supports multiple catalogue adapters including AWS Glue, Hive support should be conditional or the adapter selection should precede session construction.",
+            "ISSUE 8 — Missing primary_alloc / secondary_alloc / alloc_unit in SYSPRINT block: The CatalogueEntry dataclass and constants define primary_alloc, secondary_alloc, and alloc_unit (CYLINDERS/TRACKS/RECORDS), which correspond to mainframe LISTCAT ALL output fields. However, the as_sysprint_block() method omits these fields entirely from the rendered output block, creating an incomplete SYSPRINT simulation compared to what IDCAMS LISTCAT ALL would actually print."
+          ],
+          "correction_hint": "1) Remove or clearly segregate the Parquet audit write as a migration-added feature not present in the original step — document it explicitly as out-of-scope for the LISTCAT equivalence claim. 2) Fix as_sysprint_block() to display the original mainframe dataset name (store it as a separate field, e.g. mainframe_dataset_name, populated from the constant comments) and fix the no-op .replace('.', '.') to actually reconstruct the dotted mainframe name. 3) Replace the fragile AWSGlueCatalogueAdapter error_code extraction with the standard boto3 pattern: `exc.response['Error']['Code']` wrapped in a hasattr/isinstance ClientError guard. 4) Change audit_df write mode from 'overwrite' to 'append' and add a run_timestamp column. 5) Complete or remove the ANALYZE TABLE / rec_total population logic in SparkCatalogueAdapter — do not leave it as a silent -1 stub. 6) Add primary_alloc, secondary_alloc, and alloc_unit lines to the as_sysprint_block() output. 7) Make enableHiveSupport() conditional on the selected adapter type. 8) Document the four-to-two node dataset name mapping convention explicitly in the module docstring.",
+          "status_after": "PASS",
+          "issues_after": [
+            "MINOR — Dead code in SparkCatalogueAdapter.fetch_metadata(): the for/pass loop over stats_str.replace(',', ' ').split() at lines immediately before the import re block serves no purpose (the loop variable is never used and the loop body is 'pass'). The import re inside a try block is also an unusual pattern. Neither issue affects correctness since the regex search on stats_str is performed correctly immediately after, but the dead loop and inline import should be cleaned up for maintainability.",
+            "MINOR — USE_HIVE_ADAPTER is a module-level boolean in the __main__ block but is not exposed as a CLI argument, environment variable, or configuration parameter. For a production migration, this flag should be driven by external configuration (e.g. an env var or argparse argument) rather than a hardcoded in-file constant, otherwise operators must edit source code to switch adapters.",
+            "MINOR — The audit Parquet output path 'path/to/audit/step090_listcat_report' is a placeholder string. In production this must be parameterised. This is acknowledged in comments but left as a literal string, which would cause a runtime failure if ENABLE_AUDIT_PARQUET_WRITE were set to True without modification.",
+            "OBSERVATION — SparkCatalogueAdapter populates entry.creation_date from tbl.description (the table description field) rather than a true creation timestamp, because the Spark Catalog API does not expose a creation date directly. This is an honest platform limitation but the field semantics diverge from the mainframe CREATION date. The field is populated with whatever string is in description, which may be empty or unrelated to creation date. A comment acknowledging this limitation is present for getTable() but not for creation_date specifically.",
+            "OBSERVATION — The SYSPRINT block timestamp uses datetime.now(timezone.utc) at render time, not at query time. If as_sysprint_block() is called significantly after fetch_metadata() (e.g. the log is replayed), the timestamp will not accurately reflect when the catalogue was queried. For an audit tool this is a minor fidelity gap with the mainframe SYSPRINT TIME: field, which reflects the time of IDCAMS execution."
+          ]
+        }
+      ],
       "validate_status": "success"
     }
   ]

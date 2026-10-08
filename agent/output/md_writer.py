@@ -1,0 +1,575 @@
+# =============================================================================
+# agent/output/md_writer.py
+#
+# PROJECT : JUIA — JCL Utility Intelligence Agent
+# PURPOSE : Assemble all decoded, generated, and validated information
+#           into a single structured Markdown migration specification.
+#
+# WHAT THIS MODULE DOES (plain English):
+#   After Phases 2-5 have parsed, decoded, generated, and validated the
+#   JCL job, this module brings everything together into one document
+#   that a development team can use as their migration guide:
+#
+#     - Executive summary (step count, utility breakdown, validation status)
+#     - Embedded data lineage diagram (Mermaid)
+#     - Per-step sections containing:
+#         * Business rule in plain English
+#         * Key field mappings (mainframe offset → column name)
+#         * Operations list
+#         * Validation status and any issues noted
+#         * PySpark function signature and docstring snippet
+#         * Link to the full generated code file
+#     - Migration notes aggregated from all steps
+#
+# OUTPUT:
+#   outputs/wire_payment_batch_migration_spec.md
+#
+# THE DOCUMENT RENDERS BEAUTIFULLY IN:
+#   GitHub repository view (including the Mermaid diagram)
+#   VS Code with Markdown Preview extension
+#   Any Markdown viewer that supports Mermaid (most do as of 2024)
+# =============================================================================
+
+
+# =============================================================================
+# SECTION 1 — IMPORTS
+# =============================================================================
+
+# os — built into Python.
+# Used to: check if files exist, build paths.
+import os
+
+# datetime — built into Python.
+# Used to: add a generation timestamp to the document header.
+from datetime import datetime
+
+
+# =============================================================================
+# SECTION 2 — CONSTANTS
+# =============================================================================
+
+# Status icons for Markdown rendering
+ICON_PASS    = "✅"
+ICON_FAIL    = "❌"
+ICON_WARN    = "⚠️"
+ICON_SKIP    = "⏭️"
+ICON_INFO    = "ℹ️"
+ICON_CODE    = "💻"
+ICON_DATA    = "🗄️"
+ICON_COPY    = "📋"
+ICON_PROGRAM = "🔧"
+
+# Maximum number of lines to show from a generated PySpark file
+# before truncating with a "see full file" note
+MAX_PYSPARK_LINES = 40
+
+
+# =============================================================================
+# SECTION 3 — UTILITY HELPERS
+# =============================================================================
+
+def status_icon(status):
+    """
+    Returns a Markdown-renderable icon for a validation status string.
+
+    Parameters:
+        status : "PASS", "FAIL", "ERROR", "skipped", or anything else
+
+    Returns:
+        An emoji string.
+    """
+
+    status_upper = str(status).upper()
+    if status_upper == "PASS":
+        return ICON_PASS
+    elif status_upper == "FAIL":
+        return ICON_FAIL
+    elif status_upper in ("ERROR", "ERRORS"):
+        return ICON_WARN
+    elif status_upper == "SKIPPED":
+        return ICON_SKIP
+    else:
+        return ICON_INFO
+
+
+def read_pyspark_snippet(code_path, max_lines):
+    """
+    Reads the first max_lines lines from a generated PySpark file.
+
+    Returns a tuple of (snippet_text, was_truncated).
+    snippet_text : the code lines joined as a string
+    was_truncated: True if the file was longer than max_lines
+    """
+
+    if not os.path.exists(code_path):
+        return "(file not found)", False
+
+    with open(code_path, encoding="utf-8") as f:
+        all_lines = f.readlines()
+
+    if len(all_lines) <= max_lines:
+        return "".join(all_lines), False
+    else:
+        snippet = "".join(all_lines[:max_lines])
+        return snippet, True
+
+
+def get_validation_result_for_step(step_name, validation_map):
+    """
+    Looks up the validation result for a step by name.
+
+    Parameters:
+        step_name      : the step name to look up
+        validation_map : dict of step_name → validation result
+
+    Returns:
+        The validation result dict, or an empty dict if not found.
+    """
+
+    return validation_map.get(step_name, {})
+
+
+# =============================================================================
+# SECTION 4 — SECTION WRITERS
+# Each function writes one section of the Markdown document.
+# They all return a string that gets joined into the final document.
+# =============================================================================
+
+def write_document_header(job_name, jcl_filename):
+    """
+    Writes the title and metadata header of the document.
+    """
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
+
+    lines = [
+        f"# JUIA Migration Specification",
+        f"## Job: {job_name}",
+        f"",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| Source JCL | `{jcl_filename}` |",
+        f"| Generated by | JUIA — JCL Utility Intelligence Agent |",
+        f"| Generated | {timestamp} |",
+        f"| Stack | Claude API + ChromaDB + sentence-transformers |",
+        f"",
+        f"---",
+        f"",
+    ]
+
+    return "\n".join(lines)
+
+
+def write_executive_summary(all_steps_data, validation_map):
+    """
+    Writes the executive summary table showing step counts and status.
+    """
+
+    total_steps       = len(all_steps_data)
+    decoded_steps     = sum(1 for s in all_steps_data
+                            if s["decoded"].get("decode_status") == "success")
+    copy_steps        = sum(1 for s in all_steps_data
+                            if s["decoded"].get("decode_status") == "skipped"
+                            and s["decoded"].get("utility_type") == "IEBGENER")
+    program_steps     = sum(1 for s in all_steps_data
+                            if s["decoded"].get("utility_type") == "PROGRAM")
+
+    # Count validation results
+    pass_count  = sum(1 for v in validation_map.values()
+                      if v.get("validation_status") == "PASS")
+    total_valid = len(validation_map)
+
+    # Count utility types
+    utility_counts = {}
+    for step_data in all_steps_data:
+        utility = step_data["decoded"].get("utility_type", "UNKNOWN")
+        utility_counts[utility] = utility_counts.get(utility, 0) + 1
+
+    utility_table = "\n".join(
+        f"| {utility} | {count} |"
+        for utility, count in sorted(utility_counts.items())
+    )
+
+    validation_summary = (
+        f"{pass_count}/{total_valid} PASS"
+        if total_valid > 0 else "Not run"
+    )
+
+    lines = [
+        "## Executive Summary",
+        "",
+        "### Job Metrics",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Total steps | {total_steps} |",
+        f"| Utility steps decoded | {decoded_steps} |",
+        f"| Straight copy steps (IEBGENER DUMMY) | {copy_steps} |",
+        f"| Non-utility program steps | {program_steps} |",
+        f"| Validation result | {validation_summary} |",
+        "",
+        "### Utility Breakdown",
+        "",
+        "| Utility | Step Count |",
+        "|---------|------------|",
+        utility_table,
+        "",
+        "---",
+        "",
+    ]
+
+    return "\n".join(lines)
+
+
+def write_diagram_section(mermaid_source):
+    """
+    Embeds the Mermaid data lineage diagram in the document.
+    """
+
+    lines = [
+        "## Data Lineage",
+        "",
+        "> This diagram shows how data flows through the job.",
+        "> Rendered automatically in GitHub and VS Code Markdown preview.",
+        "",
+        "```mermaid",
+        mermaid_source,
+        "```",
+        "",
+        "---",
+        "",
+    ]
+
+    return "\n".join(lines)
+
+
+def write_decoded_step_section(step_data, validation_map, pyspark_folder):
+    """
+    Writes the full analysis section for one decoded utility step.
+
+    Includes: business rule, key fields, operations, validation, PySpark snippet.
+
+    Parameters:
+        step_data      : dict with "decoded" and "original" step data
+        validation_map : dict of step_name → validation result
+        pyspark_folder : path to the folder containing generated .py files
+    """
+
+    decoded      = step_data["decoded"]
+    step_name    = decoded.get("step_name", "UNKNOWN")
+    utility_type = decoded.get("utility_type", "UNKNOWN")
+    pgm          = decoded.get("pgm", "UNKNOWN")
+    business_rule = decoded.get("business_rule", "")
+    key_fields   = decoded.get("key_fields", [])
+    operations   = decoded.get("operations", [])
+    notes        = decoded.get("notes", "")
+    input_files  = decoded.get("input_files", [])
+    output_files = decoded.get("output_files", [])
+
+    validation   = get_validation_result_for_step(step_name, validation_map)
+    val_status   = validation.get("validation_status", "Not run")
+    val_icon     = status_icon(val_status)
+    issues       = validation.get("issues_found", [])
+    corrections  = validation.get("corrections_applied", 0)
+
+    # Path to the generated PySpark file
+    code_filename = f"{step_name}_{utility_type}.py"
+    code_path     = os.path.join(pyspark_folder, code_filename)
+
+    lines = []
+
+    # --- Step header ---
+    lines.append(f"## {step_name} — {utility_type}")
+    lines.append(f"")
+    lines.append(f"| Field | Value |")
+    lines.append(f"|-------|-------|")
+    lines.append(f"| Program | `{pgm}` |")
+    lines.append(f"| Utility | {utility_type} |")
+    lines.append(f"| Validation | {val_icon} {val_status} |")
+    if corrections > 0:
+        lines.append(f"| Corrections applied | {corrections} |")
+    lines.append(f"")
+
+    # --- Business rule ---
+    lines.append(f"### Business Rule")
+    lines.append(f"")
+    lines.append(f"{business_rule}")
+    lines.append(f"")
+
+    # --- Files ---
+    if input_files or output_files:
+        lines.append(f"### Files")
+        lines.append(f"")
+        if input_files:
+            for f in input_files:
+                lines.append(f"- {ICON_DATA} **Input:** `{f}`")
+        if output_files:
+            for f in output_files:
+                lines.append(f"- {ICON_DATA} **Output:** `{f}`")
+        lines.append(f"")
+
+    # --- Key fields table ---
+    if key_fields:
+        lines.append(f"### Key Fields")
+        lines.append(f"")
+        lines.append(f"| Offset | Length | Format | Business Meaning |")
+        lines.append(f"|--------|--------|--------|-----------------|")
+        for field in key_fields:
+            offset  = field.get("offset", "?")
+            length  = field.get("length", "?")
+            fmt     = field.get("format", "?")
+            meaning = field.get("meaning", "")
+            lines.append(f"| {offset} | {length} | `{fmt}` | {meaning} |")
+        lines.append(f"")
+
+    # --- Operations ---
+    if operations:
+        lines.append(f"### Operations")
+        lines.append(f"")
+        for op in operations:
+            op_type = op.get("type", "?")
+            op_desc = op.get("description", "")
+            lines.append(f"- **[{op_type}]** {op_desc}")
+        lines.append(f"")
+
+    # --- Validation summary ---
+    lines.append(f"### Validation")
+    lines.append(f"")
+    lines.append(f"**Status:** {val_icon} {val_status}")
+    lines.append(f"")
+
+    checks = validation.get("checks", {})
+    if checks:
+        lines.append(f"| Check | Status |")
+        lines.append(f"|-------|--------|")
+        for check_name, check_result in checks.items():
+            check_status = check_result.get("status", "?")
+            check_icon   = status_icon(check_status) if check_status != "NA" else "—"
+            lines.append(f"| {check_name} | {check_icon} {check_status} |")
+        lines.append(f"")
+
+    if issues:
+        lines.append(f"**Issues noted ({len(issues)}):**")
+        lines.append(f"")
+        for issue in issues:
+            lines.append(f"> {ICON_INFO} {issue}")
+            lines.append(f"")
+
+    # --- Migration notes ---
+    if notes:
+        lines.append(f"### Migration Notes")
+        lines.append(f"")
+        lines.append(f"{notes}")
+        lines.append(f"")
+
+    # --- PySpark snippet ---
+    lines.append(f"### Generated PySpark")
+    lines.append(f"")
+
+    if os.path.exists(code_path):
+        snippet, was_truncated = read_pyspark_snippet(code_path, MAX_PYSPARK_LINES)
+        lines.append(f"{ICON_CODE} **Full file:** `outputs/pyspark/{code_filename}`")
+        lines.append(f"")
+        lines.append(f"```python")
+        lines.append(snippet.rstrip())
+        lines.append(f"```")
+        if was_truncated:
+            lines.append(f"")
+            lines.append(f"*... (truncated — see `outputs/pyspark/{code_filename}` "
+                         f"for complete code)*")
+    else:
+        lines.append(f"{ICON_WARN} Generated file not found: `{code_path}`")
+        lines.append(f"Run `python scripts/test_generator.py` to generate.")
+
+    lines.append(f"")
+    lines.append(f"---")
+    lines.append(f"")
+
+    return "\n".join(lines)
+
+
+def write_copy_step_section(step_data):
+    """
+    Writes a section for an IEBGENER DUMMY (straight copy) step.
+
+    These steps have no control card logic to decode — they are
+    straight file copies. The section documents the input → output
+    mapping and notes that no transformation occurs.
+    """
+
+    decoded      = step_data["decoded"]
+    step_name    = decoded.get("step_name", "UNKNOWN")
+    business_rule = decoded.get("business_rule", "")
+    input_files  = decoded.get("input_files", [])
+    output_files = decoded.get("output_files", [])
+    notes        = decoded.get("notes", "")
+
+    lines = [
+        f"## {step_name} — IEBGENER (Straight Copy)",
+        f"",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| Program | `IEBGENER` |",
+        f"| SYSIN | `DD DUMMY` (no control cards) |",
+        f"| Validation | {ICON_PASS} PASS (hardcoded) |",
+        f"",
+        f"### Business Rule",
+        f"",
+        f"{business_rule}",
+        f"",
+    ]
+
+    if input_files or output_files:
+        lines.append("### Files")
+        lines.append("")
+        for f in input_files:
+            lines.append(f"- {ICON_DATA} **Input:** `{f}`")
+        for f in output_files:
+            lines.append(f"- {ICON_DATA} **Output:** `{f}`")
+        lines.append("")
+
+    lines.append(f"### Migration Equivalent")
+    lines.append(f"")
+    lines.append(f"```python")
+    lines.append(f"import shutil")
+    if input_files and output_files:
+        lines.append(
+            f"shutil.copy2('{input_files[0]}', '{output_files[0]}')"
+        )
+    else:
+        lines.append(f"shutil.copy2(source_path, destination_path)")
+    lines.append(f"```")
+    lines.append(f"")
+
+    if notes:
+        lines.append(f"> {ICON_INFO} {notes}")
+        lines.append(f"")
+
+    lines.append(f"---")
+    lines.append(f"")
+
+    return "\n".join(lines)
+
+
+def write_program_step_section(step_data):
+    """
+    Writes a section for a non-utility PROGRAM step (COBOL, Assembler, PL/I).
+
+    JUIA does not decode these steps — they require separate source code
+    analysis. The section documents the DD statements and notes that the
+    program source must be reviewed separately.
+    """
+
+    decoded   = step_data["decoded"]
+    original  = step_data["original"]
+    step_name = decoded.get("step_name", "UNKNOWN")
+    pgm       = decoded.get("pgm", "UNKNOWN")
+
+    # Collect non-system DD statements from the original parsed step
+    skip_ddnames = {"SYSPRINT", "SYSOUT", "SYSABEND", "SYSIN"}
+    dd_list = []
+    for dd in original.get("dd_statements", []):
+        ddname = dd.get("ddname", "").upper()
+        if ddname not in skip_ddnames:
+            dd_list.append((ddname, dd.get("parameters", "")))
+
+    lines = [
+        f"## {step_name} — PROGRAM (Non-Utility)",
+        f"",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| Program | `{pgm}` |",
+        f"| Type | Custom application (COBOL / Assembler / PL/I) |",
+        f"| Validation | {ICON_SKIP} Not applicable |",
+        f"",
+        f"> {ICON_WARN} **JUIA does not decode non-utility program steps.**",
+        f"> The business logic is embedded in the program source code.",
+        f"> Obtain the source from your version control system and analyse separately.",
+        f"",
+    ]
+
+    if dd_list:
+        lines.append("### DD Statements")
+        lines.append("")
+        lines.append("| DD Name | Parameters |")
+        lines.append("|---------|------------|")
+        for ddname, params in dd_list:
+            lines.append(f"| `{ddname}` | `{params[:80]}` |")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# SECTION 5 — MAIN ASSEMBLY FUNCTION
+# =============================================================================
+
+def assemble_migration_spec(job_name, jcl_filename, all_steps_data,
+                             validation_map, mermaid_source, pyspark_folder):
+    """
+    Assembles the complete migration specification Markdown document.
+
+    This is the main function of this module. It calls all the section
+    writer functions in order and joins them into one document string.
+
+    Parameters:
+        job_name       : job name string (e.g. "WIRE_PAYMENT_BATCH")
+        jcl_filename   : source JCL filename (e.g. "wire_payment_batch.jcl")
+        all_steps_data : list of step data dicts, each with:
+                           "decoded"  : Phase 3 decoded result
+                           "original" : Phase 2 parsed step
+        validation_map : dict of step_name → Phase 5 validation result
+        mermaid_source : the Mermaid diagram string from diagram_generator
+        pyspark_folder : path to the folder containing generated .py files
+
+    Returns:
+        The complete Markdown document as a single string.
+    """
+
+    sections = []
+
+    # Document header
+    sections.append(write_document_header(job_name, jcl_filename))
+
+    # Executive summary
+    sections.append(write_executive_summary(all_steps_data, validation_map))
+
+    # Data lineage diagram
+    sections.append(write_diagram_section(mermaid_source))
+
+    # Step analysis heading
+    sections.append("## Step Analysis\n\n")
+
+    # One section per step
+    for step_data in all_steps_data:
+
+        decoded      = step_data["decoded"]
+        utility_type = decoded.get("utility_type", "PROGRAM")
+        decode_status = decoded.get("decode_status", "")
+        sysin_source = decoded.get("sysin_source", "none")
+
+        if utility_type == "PROGRAM":
+            # Non-utility program step
+            sections.append(write_program_step_section(step_data))
+
+        elif (utility_type == "IEBGENER"
+              and sysin_source == "dummy"):
+            # Straight copy step
+            sections.append(write_copy_step_section(step_data))
+
+        elif decode_status == "success":
+            # Fully decoded utility step
+            sections.append(write_decoded_step_section(
+                step_data      = step_data,
+                validation_map = validation_map,
+                pyspark_folder = pyspark_folder
+            ))
+
+        else:
+            # Fallback — any other skipped step
+            sections.append(write_copy_step_section(step_data))
+
+    return "\n".join(sections)

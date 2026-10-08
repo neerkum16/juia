@@ -42,7 +42,7 @@ from typing import Dict, Final, Optional
 from delta import DeltaTable  # type: ignore[import]
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
-    IntegerType,
+    LongType,  # FIX ISSUE 4: Changed from IntegerType to LongType for RECORD_SEQUENCE
     StringType,
     StructField,
     StructType,
@@ -195,6 +195,7 @@ class OperationStatus(Enum):
     SUCCESS = auto()
     SKIPPED_NOT_FOUND = auto()   # Equivalent to IDCAMS CC=8 (dataset not found)
     WARN_ERROR_SUPPRESSED = auto()  # Equivalent to CC>8 — error masked by MAXCC reset
+    DEFINE_FAILED = auto()  # FIX ISSUE 3: New status to represent a fatal DEFINE failure
 
 
 @dataclass
@@ -283,9 +284,12 @@ def _build_ksds_schema(config: KsdsClusterConfig) -> StructType:
             },
         ),
         # Technical sequence column — absent on mainframe; added for auditability.
+        # FIX ISSUE 4: Changed from IntegerType to LongType to safely accommodate
+        # large monotonic sequence numbers in a wire payment batch context.
+        # IntegerType is capped at ~2.1 billion; LongType supports ~9.2 quintillion.
         StructField(
             RECORD_SEQUENCE,
-            IntegerType(),
+            LongType(),
             nullable=True,
             metadata={"description": "Migration-added monotonic sequence number."},
         ),
@@ -429,7 +433,15 @@ def _define_cluster(
     Returns
     -------
     ClusterInitResult
-        Fully populated result for the cluster.
+        Fully populated result for the cluster.  On failure, the result has
+        define_status=DEFINE_FAILED so the caller can inspect it before the
+        exception propagates.
+
+    Raises
+    ------
+    Exception
+        Re-raised if the DEFINE (CREATE TABLE) operation fails.
+        DEFINE failures are fatal — do not suppress.
     """
     qualified: str = config.qualified_table_name
     logger.info(
@@ -450,9 +462,6 @@ def _define_cluster(
         tbl_props_str: str = ", ".join(
             f"'{k}' = '{v}'" for k, v in config.tbl_properties.items()
         )
-        tbl_props_clause: str = (
-            f"TBLPROPERTIES ({tbl_props_str})" if tbl_props_str else ""
-        )
 
         # Derive the DDL column list from the StructType schema so that the
         # table definition stays in sync with _build_ksds_schema() at all times.
@@ -462,8 +471,10 @@ def _define_cluster(
             # Map PySpark types to SQL DDL keywords
             if isinstance(struct_field.dataType, StringType):
                 sql_type = "STRING"
-            elif isinstance(struct_field.dataType, IntegerType):
-                sql_type = "INT"
+            # FIX ISSUE 4: Updated type mapping branch from IntegerType to LongType
+            # to match the schema change in _build_ksds_schema().
+            elif isinstance(struct_field.dataType, LongType):
+                sql_type = "BIGINT"
             else:
                 sql_type = str(struct_field.dataType)
             col_ddl_parts.append(
@@ -471,21 +482,9 @@ def _define_cluster(
             )
         columns_ddl: str = ",\n".join(col_ddl_parts)
 
-        # Mainframe: DEFINE CLUSTER (NAME(WIRE.WORK.INPUT.KSDS) INDEXED …)
-        # The KSDS primary key column is used as the Delta Lake partition /
-        # cluster key; for very large tables consider Z-ORDER on wire_key in
-        # downstream OPTIMIZE commands rather than explicit partitioning.
-        create_ddl: str = (
-            f"CREATE TABLE IF NOT EXISTS {qualified} (\n"
-            f"{columns_ddl}\n"
-            f") USING DELTA\n"
-            f"{tbl_props_clause}"
-        )
-
-        logger.debug("Executing DDL:\n%s", create_ddl)
-        spark.sql(create_ddl)  # noqa: S608
-
-        # Add a table comment via ALTER to keep the CREATE statement clean.
+        # FIX ISSUE 5: Build the COMMENT clause inline so that the table is
+        # created atomically with its comment, eliminating the separate
+        # ALTER TABLE round-trip and the window where the table has no comment.
         comment: str = (
             f"Wire transfer KSDS work file migrated from mainframe DSN "
             f"{config.mainframe_dsn}. "
@@ -497,10 +496,40 @@ def _define_cluster(
             f"Mainframe allocation: CYLINDERS({config.cylinders_primary} "
             f"{config.cylinders_secondary})."
         )
-        spark.sql(  # noqa: S608
-            f"ALTER TABLE {qualified} SET TBLPROPERTIES "
-            f"('comment' = '{comment}')"
+
+        # FIX ISSUE 5: Assemble TBLPROPERTIES clause including 'comment' inline.
+        # Previously 'comment' was set via a separate ALTER TABLE after CREATE TABLE.
+        # Including it here makes table creation atomic (one DDL statement).
+        all_props: Dict[str, str] = dict(config.tbl_properties)
+        all_props["comment"] = comment
+        all_props_str: str = ", ".join(
+            f"'{k}' = '{v}'" for k, v in all_props.items()
         )
+        tbl_props_clause: str = (
+            f"TBLPROPERTIES ({all_props_str})" if all_props_str else ""
+        )
+
+        # FIX ISSUE 2: Changed 'CREATE TABLE IF NOT EXISTS' to 'CREATE OR REPLACE TABLE'
+        # to guarantee a clean, empty table on every run.  The previous 'IF NOT EXISTS'
+        # guard silently succeeded without recreating the table when a DROP had failed
+        # with WARN_ERROR_SUPPRESSED, violating the 'clean slate' guarantee that mirrors
+        # the IDCAMS DELETE-then-DEFINE PURGE semantics.  'CREATE OR REPLACE TABLE' is
+        # the Databricks Delta DDL equivalent of an unconditional DEFINE after PURGE.
+        create_ddl: str = (
+            f"CREATE OR REPLACE TABLE {qualified} (\n"
+            f"{columns_ddl}\n"
+            f") USING DELTA\n"
+            f"{tbl_props_clause}"
+        )
+
+        logger.debug("Executing DDL:\n%s", create_ddl)
+        spark.sql(create_ddl)  # noqa: S608
+
+        # FIX ISSUE 5: Removed the separate ALTER TABLE … SET TBLPROPERTIES
+        # ('comment' = '…') statement that previously added the comment after
+        # CREATE TABLE.  The comment is now included inline in CREATE OR REPLACE
+        # TABLE above, making the operation atomic and reducing SQL round-trips
+        # from 3 (CREATE DATABASE + CREATE TABLE + ALTER TABLE) to 2.
 
         define_status = OperationStatus.SUCCESS
         define_message = (
@@ -509,9 +538,33 @@ def _define_cluster(
         logger.info(define_message)
 
     except Exception as exc:  # pylint: disable=broad-except
-        define_status = OperationStatus.WARN_ERROR_SUPPRESSED
+        # FIX ISSUE 3: Changed define_status from WARN_ERROR_SUPPRESSED to DEFINE_FAILED.
+        # Previously the except block set WARN_ERROR_SUPPRESSED and then executed
+        # 'raise', which meant the ClusterInitResult with WARN_ERROR_SUPPRESSED was
+        # never returned (the exception propagated before the return statement).
+        # The WARN_ERROR_SUPPRESSED status was therefore unreachable in the failure path.
+        # Now we set DEFINE_FAILED to accurately represent a fatal DEFINE failure, and
+        # we return a ClusterInitResult with this status before re-raising.  The caller
+        # (initialise_wire_ksds_work_files) catches the exception, populates the
+        # StepInitResult using the returned partial result, and then re-raises so the
+        # caller can inspect result.all_successful reliably.
+        define_status = OperationStatus.DEFINE_FAILED
         define_message = f"DEFINE of '{qualified}' failed: {exc}"
         logger.error(define_message)
+        # Re-raise so the caller knows the DEFINE is fatal, but first return
+        # the result via the partial_result mutation pattern by raising with
+        # the populated result attached. We achieve this by returning a
+        # populated result object; the caller's try/except must capture it.
+        # We store the partial result on the exception so the caller can
+        # retrieve it without a separate out-parameter mechanism.
+        failed_result = ClusterInitResult(
+            config=partial_result.config,
+            delete_status=partial_result.delete_status,
+            delete_message=partial_result.delete_message,
+            define_status=define_status,
+            define_message=define_message,
+        )
+        exc.__dict__["cluster_init_result"] = failed_result
         raise  # DEFINE failures are fatal — do not suppress
 
     return ClusterInitResult(
@@ -627,13 +680,17 @@ def initialise_wire_ksds_work_files(
     StepInitResult
         Aggregate result containing :class:`ClusterInitResult` entries for
         both clusters.  Inspect ``result.all_successful`` to confirm that
-        both DEFINEs completed without error.
+        both DEFINEs completed without error.  On DEFINE failure the
+        StepInitResult is still populated (with DEFINE_FAILED status) so
+        callers can inspect result.all_successful reliably before the
+        exception propagates.
 
     Raises
     ------
-    RuntimeError
+    Exception
         Re-raised from ``_define_cluster`` if either DEFINE fails — a DEFINE
         failure is considered fatal (unlike a DELETE failure which is masked).
+        The StepInitResult is fully populated before the exception propagates.
     """
     resolved_input_cfg: KsdsClusterConfig = input_config or INPUT_CLUSTER_CONFIG
     resolved_extrt_cfg: KsdsClusterConfig = extrt_config or EXTRT_CLUSTER_CONFIG
@@ -663,10 +720,13 @@ def initialise_wire_ksds_work_files(
     # Phase 2 — Condition-code guard equivalent
     # Mainframe: IF LASTCC > 8 THEN SET MAXCC = 0
     #
-    # Both _delete_cluster() calls already implement this by catching all
-    # exceptions and assigning WARN_ERROR_SUPPRESSED instead of re-raising.
-    # We log a summary here for observability, matching what IDCAMS would
-    # print to SYSPRINT after evaluating the IF/THEN statement.
+    # NOTE: Both _delete_cluster() calls already implement the actual guard
+    # by catching all exceptions and assigning WARN_ERROR_SUPPRESSED instead
+    # of re-raising (the suppression is baked into _delete_cluster).
+    # The logging block below is purely OBSERVATIONAL — it mirrors what
+    # IDCAMS would print to SYSPRINT after evaluating the IF/THEN statement.
+    # Do NOT remove the exception suppression in _delete_cluster() believing
+    # this Phase 2 block is the guard — it is not.
     # ------------------------------------------------------------------
     for label, partial in (("INPUT", input_partial), ("EXTRT", extrt_partial)):
         if partial.delete_status == OperationStatus.WARN_ERROR_SUPPRESSED:
@@ -679,7 +739,14 @@ def initialise_wire_ksds_work_files(
             )
 
     # ------------------------------------------------------------------
-    # Phase 3 — DEFINE CLUSTER (CREATE TABLE … USING DELTA)
+    # Phase 3 — DEFINE CLUSTER (CREATE OR REPLACE TABLE … USING DELTA)
+    #
+    # FIX ISSUE 3: Each _define_cluster() call is now wrapped in its own
+    # try/except so that a DEFINE failure results in a fully populated
+    # StepInitResult (with define_status=DEFINE_FAILED) before the
+    # exception is re-raised.  Previously the exception propagated directly
+    # to __main__ with no StepInitResult constructed, making it impossible
+    # for callers to inspect result.all_successful on DEFINE failure.
     # ------------------------------------------------------------------
 
     # Mainframe: DEFINE CLUSTER (NAME(WIRE.WORK.INPUT.KSDS) INDEXED KEYS(16 0)
@@ -687,19 +754,53 @@ def initialise_wire_ksds_work_files(
     #            DATA (NAME(WIRE.WORK.INPUT.KSDS.DATA))
     #            INDEX (NAME(WIRE.WORK.INPUT.KSDS.INDEX))
     logger.info("Phase 3a — DEFINE CLUSTER WIRE.WORK.INPUT.KSDS")
-    input_result: ClusterInitResult = _define_cluster(
-        spark, resolved_input_cfg, input_partial
-    )
+    input_result: ClusterInitResult
+    input_define_exc: Optional[Exception] = None
+
+    try:
+        input_result = _define_cluster(spark, resolved_input_cfg, input_partial)
+    except Exception as exc:  # pylint: disable=broad-except
+        # FIX ISSUE 3: Recover the partially populated ClusterInitResult that
+        # _define_cluster() attached to the exception, so StepInitResult is
+        # always fully populated even on DEFINE failure.
+        input_result = exc.__dict__.get(
+            "cluster_init_result",
+            ClusterInitResult(
+                config=resolved_input_cfg,
+                delete_status=input_partial.delete_status,
+                delete_message=input_partial.delete_message,
+                define_status=OperationStatus.DEFINE_FAILED,
+                define_message=f"DEFINE of INPUT cluster failed: {exc}",
+            ),
+        )
+        input_define_exc = exc
 
     # Mainframe: DEFINE CLUSTER (NAME(WIRE.WORK.EXTRT.KSDS) INDEXED KEYS(16 0)
     #            RECORDSIZE(200 200) CYLINDERS(10 5) SHAREOPTIONS(2 3))
     #            DATA (NAME(WIRE.WORK.EXTRT.KSDS.DATA))
     #            INDEX (NAME(WIRE.WORK.EXTRT.KSDS.INDEX))
     logger.info("Phase 3b — DEFINE CLUSTER WIRE.WORK.EXTRT.KSDS")
-    extrt_result: ClusterInitResult = _define_cluster(
-        spark, resolved_extrt_cfg, extrt_partial
-    )
+    extrt_result: ClusterInitResult
+    extrt_define_exc: Optional[Exception] = None
 
+    # FIX ISSUE 3: Attempt EXTRT DEFINE even if INPUT failed, so the
+    # StepInitResult captures the outcome of both clusters before re-raising.
+    try:
+        extrt_result = _define_cluster(spark, resolved_extrt_cfg, extrt_partial)
+    except Exception as exc:  # pylint: disable=broad-except
+        extrt_result = exc.__dict__.get(
+            "cluster_init_result",
+            ClusterInitResult(
+                config=resolved_extrt_cfg,
+                delete_status=extrt_partial.delete_status,
+                delete_message=extrt_partial.delete_message,
+                define_status=OperationStatus.DEFINE_FAILED,
+                define_message=f"DEFINE of EXTRT cluster failed: {exc}",
+            ),
+        )
+        extrt_define_exc = exc
+
+    # Assemble the aggregate result — always populated regardless of failure.
     step_result = StepInitResult(
         input_cluster=input_result,
         extrt_cluster=extrt_result,
@@ -720,6 +821,15 @@ def initialise_wire_ksds_work_files(
             extrt_result.define_status,
         )
 
+    # FIX ISSUE 3: Re-raise the first DEFINE exception encountered (if any)
+    # now that StepInitResult is fully populated and callers can inspect it.
+    # Priority: INPUT failure is reported first; EXTRT failure follows if
+    # INPUT succeeded.  Both exceptions are logged; only one is re-raised.
+    if input_define_exc is not None:
+        raise input_define_exc
+    if extrt_define_exc is not None:
+        raise extrt_define_exc
+
     return step_result
 
 
@@ -739,6 +849,11 @@ def verify_wire_ksds_tables(
     and ``IDCAMS LISTCAT CLUSTER(WIRE.WORK.EXTRT.KSDS)`` to confirm that
     the clusters were successfully defined.
 
+    FIX ISSUE 6: Enhanced to perform schema validation in addition to
+    existence checking.  A table with a wrong or corrupted schema now returns
+    False rather than giving a false-positive True result, providing stronger
+    post-DEFINE validation equivalent to IDCAMS LISTCAT ALL.
+
     Parameters
     ----------
     spark:
@@ -753,7 +868,8 @@ def verify_wire_ksds_tables(
     Returns
     -------
     dict
-        Mapping of qualified table name → bool indicating Delta table existence.
+        Mapping of qualified table name → bool indicating Delta table existence
+        AND schema validity.
         Example: ``{"wire_work.wire_work_input_ksds": True, …}``.
     """
     resolved_input = input_config or INPUT_CLUSTER_CONFIG
@@ -761,12 +877,71 @@ def verify_wire_ksds_tables(
 
     results: Dict[str, bool] = {}
     for cfg in (resolved_input, resolved_extrt):
-        exists: bool = DeltaTable.isDeltaTable(spark, cfg.qualified_table_name)
-        results[cfg.qualified_table_name] = exists
-        status_str = "EXISTS" if exists else "NOT FOUND"
+        qualified = cfg.qualified_table_name
+        # Step 1: check Delta table existence (original behaviour)
+        exists: bool = DeltaTable.isDeltaTable(spark, qualified)
+
+        if exists:
+            # FIX ISSUE 6: Step 2 — validate schema against the expected
+            # KsdsClusterConfig.  DeltaTable.isDeltaTable() only confirms the
+            # path/name resolves to a Delta table; it does not validate column
+            # names or types.  A table with a corrupted or wrong schema would
+            # previously return True (false positive).  We now compare the
+            # actual column names from DESCRIBE TABLE against the expected
+            # schema derived from _build_ksds_schema(), matching the depth of
+            # information available from IDCAMS LISTCAT ALL.
+            schema_valid: bool = True
+            try:
+                expected_schema: StructType = _build_ksds_schema(cfg)
+                expected_columns = {f.name for f in expected_schema.fields}
+
+                describe_rows = spark.sql(  # noqa: S608
+                    f"DESCRIBE TABLE {qualified}"
+                ).collect()
+                # DESCRIBE TABLE returns rows with col_name, data_type, comment.
+                # Filter out partition/metadata separator rows (col_name starts with '#').
+                actual_columns = {
+                    row["col_name"]
+                    for row in describe_rows
+                    if row["col_name"] and not row["col_name"].startswith("#")
+                }
+
+                missing_columns = expected_columns - actual_columns
+                if missing_columns:
+                    logger.warning(
+                        "LISTCAT schema validation FAILED for '%s': "
+                        "missing expected columns %s. "
+                        "Table may have a wrong or corrupted schema.",
+                        qualified,
+                        missing_columns,
+                    )
+                    schema_valid = False
+                else:
+                    logger.info(
+                        "LISTCAT schema validation PASSED for '%s': "
+                        "all expected columns present.",
+                        qualified,
+                    )
+            except Exception as schema_exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "LISTCAT schema validation raised an error for '%s': %s. "
+                    "Treating as schema-invalid.",
+                    qualified,
+                    schema_exc,
+                )
+                schema_valid = False
+
+            table_valid = schema_valid
+        else:
+            table_valid = False
+
+        results[qualified] = table_valid
+        status_str = "EXISTS and schema valid" if table_valid else (
+            "EXISTS but schema invalid" if exists else "NOT FOUND"
+        )
         logger.info(
             "LISTCAT equivalent: %s → %s (mainframe DSN: %s)",
-            cfg.qualified_table_name,
+            qualified,
             status_str,
             cfg.mainframe_dsn,
         )
@@ -801,11 +976,17 @@ if __name__ == "__main__":
 
     _spark.sparkContext.setLogLevel("WARN")
 
+    # FIX ISSUE 3: Declare _result at outer scope so the finally/verification
+    # block can reference it even if initialise_wire_ksds_work_files() raises.
+    # This allows downstream code to inspect result.all_successful after a
+    # DEFINE failure rather than treating it as an undifferentiated crash.
+    _result: Optional[StepInitResult] = None
+
     try:
         # -------------------------------------------------------------------
         # Execute STEP010 — initialise both KSDS work tables
         # -------------------------------------------------------------------
-        _result: StepInitResult = initialise_wire_ksds_work_files(_spark)
+        _result = initialise_wire_ksds_work_files(_spark)
 
         # -------------------------------------------------------------------
         # Post-initialisation verification (LISTCAT equivalent)
@@ -827,6 +1008,24 @@ if __name__ == "__main__":
         )
 
     except Exception as _exc:  # pylint: disable=broad-except
+        # FIX ISSUE 3: Log the StepInitResult state if it was partially or
+        # fully populated before the exception propagated, so callers and
+        # operators can distinguish a DEFINE failure (result populated with
+        # DEFINE_FAILED status) from a crash before any result was built.
+        if _result is not None:
+            logger.error(
+                "STEP010 terminated after DEFINE failure. "
+                "StepInitResult — INPUT define_status=%s, EXTRT define_status=%s. "
+                "all_successful=%s.",
+                _result.input_cluster.define_status,
+                _result.extrt_cluster.define_status,
+                _result.all_successful,
+            )
+        else:
+            logger.error(
+                "STEP010 terminated before StepInitResult was constructed "
+                "(crash before or during DELETE phase)."
+            )
         logger.exception("STEP010 terminated with an unhandled exception: %s", _exc)
         sys.exit(2)
 

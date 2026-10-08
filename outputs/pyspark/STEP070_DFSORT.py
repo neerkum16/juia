@@ -165,33 +165,36 @@ def _amount_to_fs12(col_expr):
     # This prevents silent truncation / data corruption for large summed values
     # (e.g. two max 9-byte PD records summed to an 18-digit result).
     #
-    # F.raise_error(msg) is available in Spark 3.1+ and causes the task (and
-    # ultimately the job) to fail with the supplied message, matching the
-    # abend semantics of DFSORT LENGTH overflow.
-    #
     # The guard uses F.when(...).otherwise(padded) so that the overflow check
     # and the padding are evaluated in a single column expression without
     # materialising an intermediate DataFrame.
     padded = F.lpad(as_str, _FS_AMOUNT_WIDTH, " ")
 
-    # FIX (CRITICAL): Apply the overflow guard using F.when / F.raise_error
-    # instead of silently truncating with F.substring.  F.length returns the
-    # character length of the un-padded string; if it exceeds _FS_AMOUNT_WIDTH
-    # the value cannot fit in a 12-byte FS field and must be treated as an
-    # error, exactly as DFSORT would abend.  The F.substring call has been
-    # intentionally removed to eliminate silent truncation.
+    # FIX (MODERATE): Replace F.raise_error(F.concat(...)) with a static string
+    # argument to F.raise_error().
+    #
+    # ORIGINAL (BROKEN): F.raise_error(F.concat(F.lit("..."), as_str, F.lit("'")))
+    #   The PySpark Python API for pyspark.sql.functions.raise_error() (Spark 3.1+)
+    #   expects a Python string literal, NOT a Column expression.  Passing a Column
+    #   either raises a TypeError at plan-construction time or silently misbehaves
+    #   at runtime.  The dynamic value cannot be embedded in the message via this
+    #   API without using F.expr() with a SQL string or a Python UDF.
+    #
+    # FIXED: Use a static string literal so F.raise_error() receives the type it
+    #   expects.  This correctly reproduces DFSORT abend-on-overflow semantics
+    #   (the job fails with an informative message) without a TypeError at
+    #   plan-construction time.  The static message is sufficient for operators
+    #   to identify the failing step and investigate the offending record.
     return F.when(
         F.length(as_str) > _FS_AMOUNT_WIDTH,
         F.raise_error(
-            F.concat(
-                F.lit(
-                    "DFSORT LENGTH OVERFLOW: summed amount string length exceeds "
-                    f"{_FS_AMOUNT_WIDTH} characters (TO=FS LENGTH={_FS_AMOUNT_WIDTH}). "
-                    "Value: '"
-                ),
-                as_str,
-                F.lit("'"),
-            )
+            # FIX (MODERATE): Changed from F.raise_error(F.concat(...)) to
+            # F.raise_error(<static string>).  The PySpark Python API requires
+            # a plain Python string here; a Column argument is not supported and
+            # causes a TypeError or silent misbehaviour at runtime.
+            f"DFSORT LENGTH OVERFLOW: summed amount string length exceeds "
+            f"{_FS_AMOUNT_WIDTH} characters (TO=FS LENGTH={_FS_AMOUNT_WIDTH}). "
+            f"Check the aggregated transaction_amount value for the offending group."
         ),
     ).otherwise(padded)
 
@@ -273,8 +276,10 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
 
         NOTE -- output ordering:
             The output is sorted ascending by wire_type_code and descending by
-            the numeric summed amount (_SUM_AMOUNT Decimal column), faithfully
-            replicating the DFSORT output sequence.
+            the original SORT FIELDS sort key (transaction_amount), faithfully
+            replicating the DFSORT output sequence.  The sort uses the original
+            transaction_amount sort key value, NOT the post-SUM accumulated
+            amount, matching DFSORT's behaviour exactly.
 
     Key Field Mapping
     -----------------
@@ -304,6 +309,21 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
         individual amount values, the groupBy key should be changed to
         (wire_type_code) alone -- please confirm with business stakeholders
         before changing the current correct implementation.
+
+    MINOR NOTE — non-deterministic first-record selection:
+        DFSORT's first-surviving record after SUM is determined by physical sort
+        sequence within each duplicate-key group.  Since all records in a group
+        share identical sort key values (wire_type_code, transaction_amount),
+        their relative order within the group is indeterminate on the mainframe
+        (stable relative to input tape order or undefined per DFSORT spec).
+        This code uses REF_ID ASC as a deterministic tie-breaker, which is
+        reasonable for Spark but may differ from mainframe physical-arrival-order
+        for groups with multiple duplicate records.  Non-key field values
+        (ref_id, value_date, currency_code, routing_code) on summary output rows
+        may therefore differ between the mainframe and PySpark outputs for such
+        groups.  This is an inherent limitation of migrating non-deterministic
+        mainframe behaviour to a deterministic distributed framework and should
+        be documented for business stakeholders.
     """
 
     # -------------------------------------------------------------------------
@@ -407,7 +427,7 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
     # STEP 3 -- Post-aggregation sort (output ordering) applied BEFORE select()
     #
     # The post-aggregation orderBy is applied here on df_summed -- before the
-    # select() in Step 4 -- using F.col(_SUM_AMOUNT).desc() (the Decimal column)
+    # select() in Step 4 -- using the numeric Decimal column for the amount sort
     # so that the sort is numeric, not lexicographic.  The select() is then
     # applied to the already-sorted DataFrame.
     #
@@ -416,11 +436,38 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
     # descending order for all values.
     # -------------------------------------------------------------------------
 
+    # FIX (CRITICAL): Changed F.col(_SUM_AMOUNT).desc() to
+    # F.col(TRANSACTION_AMOUNT).desc() in the orderBy call below.
+    #
+    # ORIGINAL (WRONG):
+    #   df_sorted_summed = df_summed.orderBy(
+    #       F.col(WIRE_TYPE_CODE).asc(),
+    #       F.col(_SUM_AMOUNT).desc(),   # <-- sorts by the POST-SUM accumulated value
+    #   )
+    #
+    # WHY IT WAS WRONG:
+    #   DFSORT outputs records ordered by their SORT FIELDS sort key values
+    #   (wire_type_code ASC, transaction_amount DESC from the original input),
+    #   NOT by the post-SUM accumulated amount.  When SUM changes the amount
+    #   (e.g. two records with sort key amount=500000 are summed to 1000000),
+    #   the wrong orderBy placed that group above a group with sort key
+    #   amount=750000 (sum=750000) because 1000000 > 750000.  But DFSORT
+    #   correctly places the 750000 sort-key group above the 500000 sort-key
+    #   group because 750000 > 500000 as sort key values.
+    #
+    # FIX:
+    #   Sort by F.col(TRANSACTION_AMOUNT).desc() — the original sort key column
+    #   that is preserved on df_summed via the join — instead of
+    #   F.col(_SUM_AMOUNT).desc().  This faithfully reproduces the DFSORT
+    #   SORT FIELDS=(63,3,CH,A,17,9,PD,D) output ordering on the summarised
+    #   records, regardless of how SUM changes the accumulated amount values.
+    #
     # Mainframe: SORT FIELDS=(63,3,CH,A,17,9,PD,D) -- reproduced on summed output.
-    # Sort ascending by wire_type_code then descending by the NUMERIC summed amount.
+    # Sort ascending by wire_type_code then descending by the original sort key
+    # amount (TRANSACTION_AMOUNT), NOT by the post-SUM accumulated _SUM_AMOUNT.
     df_sorted_summed = df_summed.orderBy(
         F.col(WIRE_TYPE_CODE).asc(),
-        F.col(_SUM_AMOUNT).desc(),   # numeric Decimal column -- correct descending order
+        F.col(TRANSACTION_AMOUNT).desc(),   # FIX: original sort key, not _SUM_AMOUNT
     )
 
     # -------------------------------------------------------------------------
@@ -477,9 +524,10 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
         F.rpad(F.coalesce(F.col(ROUTING_CODE), F.lit("   ")), 3, " ").alias(ROUTING_CODE),
     )
 
-    # Ordering has already been applied in Step 3 on the numeric _SUM_AMOUNT
-    # Decimal column.  No second orderBy is needed here; applying one on the
-    # FS string column would reintroduce a lexicographic-vs-numeric ordering bug.
+    # Ordering has already been applied in Step 3 on the numeric TRANSACTION_AMOUNT
+    # Decimal column (the original sort key).  No second orderBy is needed here;
+    # applying one on the FS string column would reintroduce a
+    # lexicographic-vs-numeric ordering bug.
 
     return df_reformatted
 
