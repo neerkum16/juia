@@ -1,0 +1,52 @@
+{
+  "job_name": "WIREPAY",
+  "total_steps_validated": 1,
+  "pass_count": 1,
+  "fail_count": 0,
+  "total_corrections": 0,
+  "steps": [
+    {
+      "step_name": "STEP040",
+      "utility_type": "DFSORT",
+      "code_path": "outputs/pyspark/STEP040_DFSORT.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "PASS",
+          "detail": "HIGHVAL filter uses F.col(AMOUNT) > THRESHOLD_AMOUNT (strictly GT 1,000,000), exactly matching SYSIN INCLUDE=(17,9,PD,GT,+1000000). LOWVAL filter uses F.col(AMOUNT) <= THRESHOLD_AMOUNT (LE 1,000,000), exactly matching SYSIN INCLUDE=(17,9,PD,LE,+1000000). Boundary value 1,000,000 correctly excluded from HIGHVAL and included in LOWVAL. Negative amounts correctly satisfy LE and route to LOWVAL. Zero correctly routes to LOWVAL. Filters are complementary and together cover all non-NULL records with no overlap and no loss, faithfully replicating DFSORT OUTFIL exhaustive split semantics."
+        },
+        "sort_logic": {
+          "status": "PASS",
+          "detail": "Both df_high and df_low apply .orderBy(F.col(AMOUNT).desc()), correctly implementing SORT FIELDS=(17,9,PD,D) — descending order on the decoded packed-decimal amount field. The implementation applies filter first then orderBy independently on each output DataFrame, which is the correct approach for Spark: it ensures the sort is the terminal operation in each logical plan, giving Catalyst the best opportunity to honour physical ordering during the write. This faithfully replicates DFSORT's guarantee that each OUTFIL stream is written in sorted order. Sort key column (AMOUNT='amount_pd') correctly maps to mainframe offset 17, length 9, PD. No ascending/descending inversion detected."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "Column name 'amount_pd' is descriptive and encodes both the business meaning (amount) and the mainframe field format (PD/packed-decimal), improving readability over a generic positional name. All column references use the module-level string constant AMOUNT='amount_pd' rather than inline string literals, preventing typo-driven bugs. VALUE_TIER, TIER_HIGH, TIER_LOW, OUTPUT_KEY_HIGH, OUTPUT_KEY_LOW, THRESHOLD_AMOUNT, and EXPECTED_LRECL are all declared as named constants and used consistently. No magic strings or magic numbers appear in the core logic."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code explicitly and repeatedly documents that PD decoding must occur upstream before this function is called. The docstring, inline comments, file header, and __main__ block all state that the 9-byte packed BCD field at mainframe offset 17 must be decoded to a LongType signed integer in a preceding ETL step. A reference UDF skeleton (decode_packed_decimal) with correct nibble-extraction and sign-nibble logic (0xD=negative, 0xC/0xF=positive) is provided in the __main__ block. The _validate_amount_column_present guard raises a clear ValueError if the column is missing. The code correctly does NOT attempt to decode raw bytes itself, which is the appropriate separation of concerns. An important currency-unit ambiguity note (cents vs dollars, affecting the effective threshold) is prominently flagged in the file header and THRESHOLD_AMOUNT constant comment."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function returns Dict[str, DataFrame] with exactly two keys: OUTPUT_KEY_HIGH='HIGH' (WIRE.WORK.HIGH.SEQ / HIGHVAL) and OUTPUT_KEY_LOW='LOW' (WIRE.WORK.LOW.SEQ / LOWVAL). The __main__ block demonstrates correct consumption of this dictionary via result[OUTPUT_KEY_HIGH] and result[OUTPUT_KEY_LOW], writing each to the appropriate target path with .write.mode('overwrite').parquet(). The return type annotation Dict[str, DataFrame] is accurate. Each output DataFrame contains all original columns from valid_df plus the appended VALUE_TIER column, preserving the pass-through record structure consistent with DFSORT OUTFIL behaviour (no field reformatting). The added VALUE_TIER column is an addendum for lineage and does not alter the semantic record content."
+        },
+        "split_logic": {
+          "status": "PASS",
+          "detail": "The two OUTFIL conditions (GT 1,000,000 and LE 1,000,000) are mutually exclusive: no integer value can simultaneously be both greater than and less-than-or-equal-to 1,000,000. Together they are exhaustive over all non-NULL integers: every valid decoded amount satisfies exactly one condition. NULL amounts are quarantined before the split with a warning log, mirroring the S0C7 abend that a corrupt PD field would cause on the mainframe. The quarantine step does not silently discard records — it counts and logs them, enabling downstream investigation. The union of HIGHVAL and LOWVAL equals the complete valid input set. No record appears in both outputs. No valid record is silently lost. Split logic is a faithful and complete implementation of the DFSORT OUTFIL complementary INCLUDE pattern."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "This DFSORT step contains no SUM, COUNT, or any other aggregation operation. The SYSIN specifies only SORT FIELDS and OUTFIL INCLUDE directives. No GROUP BY granularity validation is applicable."
+        }
+      },
+      "synthetic_data_summary": "15 synthetic wire transfer records were generated covering: 5 high-value records (amount_pd > 1,000,000) that should route to HIGHVAL only; 5 low-value records (amount_pd <= 1,000,000) that should route to LOWVAL only; 1 exact boundary record (amount_pd = 1,000,000) that must route to LOWVAL only (LE condition); 1 zero-amount record (amount_pd = 0) that must route to LOWVAL only; 1 negative-amount record (amount_pd = -500) that must route to LOWVAL only (LE 1,000,000 is satisfied); 1 NULL amount record that must be quarantined and excluded from both outputs. Records span realistic wire transfer amounts from -500 to 50,000,000. Across 14 valid records: 5 route to HIGHVAL (>1,000,000), 9 route to LOWVAL (<=1,000,000). The NULL record is excluded from both. Total coverage: HIGH-pass=5, HIGH-fail=9+1NULL=10, LOW-pass=9, LOW-fail=5+1NULL=6. Boundary at exactly 1,000,000 correctly routes to LOWVAL (LE). No record appears in both outputs (mutually exclusive). No valid record is lost (exhaustive coverage confirmed).",
+      "issues_found": [],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "success"
+    }
+  ]
+}

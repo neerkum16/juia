@@ -10,15 +10,15 @@ __pycache__/
 *.pyc
 *.pyo
 
-# IBM manuals — large PDFs, not for git
-corpus/raw/
-
 # ChromaDB database — auto-generated, not for git
 corpus/vectordb/
-
-# Generated outputs
-# outputs/
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Validation status cache - marker
+outputs/pyspark/*.validated
+
+# Backups after self-correction
+outputs/pyspark/backups/

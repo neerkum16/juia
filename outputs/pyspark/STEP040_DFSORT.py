@@ -74,8 +74,10 @@ VALUE_TIER: str = "value_tier"  # derived column — "HIGH" | "LOW"
 # See currency unit note in the file header before changing this value.
 THRESHOLD_AMOUNT: int = 1_000_000
 
-# Human-readable tier labels written into the VALUE_TIER column (optional,
-# useful for lineage / debugging; remove if downstream expects raw files only).
+# Human-readable tier labels written into the VALUE_TIER column.
+# FIX #2: These constants were previously declared but never used (dead code).
+# They are now actively applied via .withColumn() in the split logic below
+# to tag each output DataFrame with its tier label for lineage/debugging.
 TIER_HIGH: str = "HIGH"
 TIER_LOW: str = "LOW"
 
@@ -141,9 +143,11 @@ def split_wire_transfers_by_value(
       1. Validate that the PD-decoded amount column is present.
       2. Drop any records where the amount is NULL (corrupted PD field) and
          log a warning — these would have caused DFSORT abend S0C7.
-      3. Sort the entire dataset by ``amount_pd`` descending.
-         Mirrors: ``SORT FIELDS=(17,9,PD,D)``
-      4. Partition the sorted stream into HIGH and LOW DataFrames.
+      3. Filter and sort each output independently to guarantee that both
+         HIGHVAL and LOWVAL output files are physically written in descending
+         order by amount_pd, faithfully replicating DFSORT OUTFIL behaviour.
+         Mirrors: ``SORT FIELDS=(17,9,PD,D)`` applied to each OUTFIL stream.
+      4. Tag each DataFrame with a VALUE_TIER column for lineage tracking.
          Mirrors: ``OUTFIL FNAMES=HIGHVAL, INCLUDE=(17,9,PD,GT,+1000000)``
                   ``OUTFIL FNAMES=LOWVAL,  INCLUDE=(17,9,PD,LE,+1000000)``
       5. Return both DataFrames in a labelled dictionary.
@@ -185,12 +189,14 @@ def split_wire_transfers_by_value(
             DataFrame equivalent of WIRE.WORK.HIGH.SEQ (HIGHVAL DD).
             Contains all records where ``amount_pd > 1,000,000``.
             Internally sorted descending by ``amount_pd``.
+            Tagged with ``value_tier = "HIGH"`` for lineage tracking.
             LRECL=200, RECFM=FB (no structural changes to records).
 
         ``"LOW"``
             DataFrame equivalent of WIRE.WORK.LOW.SEQ (LOWVAL DD).
             Contains all records where ``amount_pd <= 1,000,000``.
             Internally sorted descending by ``amount_pd``.
+            Tagged with ``value_tier = "LOW"`` for lineage tracking.
             LRECL=200, RECFM=FB (no structural changes to records).
 
         The union of HIGH and LOW equals the full valid input set (minus
@@ -249,68 +255,93 @@ def split_wire_transfers_by_value(
     valid_df: DataFrame = input_df.filter(F.col(AMOUNT).isNotNull())
 
     # ------------------------------------------------------------------
-    # 2. SORT FIELDS=(17,9,PD,D)
-    #    Sort the full valid dataset in descending order by the decoded
-    #    amount column.  This mirrors the global DFSORT sort pass that
-    #    produces the merged sorted stream before OUTFIL splitting.
+    # 2. OUTFIL FNAMES=HIGHVAL, INCLUDE=(17,9,PD,GT,+1000000)
+    #    Filter: amount strictly greater than the threshold, then sort
+    #    descending independently.
     #
-    #    Mainframe: SORT FIELDS=(17,9,PD,D)
-    # ------------------------------------------------------------------
-    logger.info(
-        "[%s] Sorting all records by '%s' descending "
-        "(mirrors: SORT FIELDS=(17,9,PD,D)).",
-        caller,
-        AMOUNT,
-    )
-
-    # NOTE: F.col(AMOUNT) references the pre-decoded LongType column.
-    #       Descending sort here preserves the DFSORT OUTFIL ordering
-    #       guarantee: both output files are internally sorted DESC by amount.
-    sorted_df: DataFrame = valid_df.orderBy(F.col(AMOUNT).desc())
-
-    # ------------------------------------------------------------------
-    # 3. OUTFIL FNAMES=HIGHVAL, INCLUDE=(17,9,PD,GT,+1000000)
-    #    Filter: amount strictly greater than the threshold.
-    #    These are high-value wire transfers routed to risk/regulatory
-    #    processing.
+    #    FIX #1: Previously, a single sorted_df.orderBy() was applied to
+    #    the full dataset, then df_high and df_low were derived via
+    #    .filter() on that sorted DataFrame.  In Spark's distributed
+    #    execution model, .filter() on a sorted DataFrame does NOT
+    #    guarantee that the physical output partitions are written in
+    #    sorted order — Catalyst may shuffle or reorder during the filter
+    #    stage.  To faithfully replicate DFSORT's guarantee that each
+    #    OUTFIL output file is internally sorted, each output DataFrame
+    #    now applies .filter() first and then calls .orderBy() independently.
+    #    This ensures the sort is the final operation in each DataFrame's
+    #    logical plan, giving Spark the best opportunity to honour the
+    #    ordering during the physical write.
     #
     #    Mainframe: OUTFIL FNAMES=HIGHVAL,
     #                      INCLUDE=(17,9,PD,GT,+1000000)
+    #               with global SORT FIELDS=(17,9,PD,D) applied to output
     # ------------------------------------------------------------------
     logger.info(
-        "[%s] Applying HIGHVAL filter: '%s' > %d "
-        "(mirrors: OUTFIL FNAMES=HIGHVAL, INCLUDE=(17,9,PD,GT,+1000000)).",
+        "[%s] Applying HIGHVAL filter: '%s' > %d then sorting descending "
+        "(mirrors: SORT FIELDS=(17,9,PD,D) + "
+        "OUTFIL FNAMES=HIGHVAL, INCLUDE=(17,9,PD,GT,+1000000)).",
         caller,
         AMOUNT,
         THRESHOLD_AMOUNT,
     )
 
-    # PD column note: AMOUNT column holds the decoded signed integer value.
-    # The comparison threshold THRESHOLD_AMOUNT = 1_000_000 corresponds to
-    # the SYSIN literal +1000000.  Confirm currency units with SMEs.
-    df_high: DataFrame = sorted_df.filter(F.col(AMOUNT) > THRESHOLD_AMOUNT)
+    # FIX #1: Filter first, then orderBy independently on df_high so that
+    # the sort is the terminal operation in the logical plan, guaranteeing
+    # the physical write respects descending order for the HIGHVAL output.
+    # FIX #2: .withColumn(VALUE_TIER, F.lit(TIER_HIGH)) activates the
+    # previously declared but unused VALUE_TIER / TIER_HIGH constants,
+    # tagging each HIGHVAL record for lineage and debugging purposes.
+    df_high: DataFrame = (
+        valid_df
+        .filter(F.col(AMOUNT) > THRESHOLD_AMOUNT)
+        # FIX #1: Independent orderBy on df_high guarantees descending sort
+        # order is physically honoured in the HIGHVAL output file.
+        .orderBy(F.col(AMOUNT).desc())
+        # FIX #2: Activate VALUE_TIER tagging — was dead code previously.
+        .withColumn(VALUE_TIER, F.lit(TIER_HIGH))
+    )
 
     # ------------------------------------------------------------------
-    # 4. OUTFIL FNAMES=LOWVAL, INCLUDE=(17,9,PD,LE,+1000000)
-    #    Filter: amount less than or equal to the threshold.
-    #    These are standard wire transfers routed to normal settlement.
+    # 3. OUTFIL FNAMES=LOWVAL, INCLUDE=(17,9,PD,LE,+1000000)
+    #    Filter: amount less than or equal to the threshold, then sort
+    #    descending independently.
+    #
+    #    FIX #1 (continued): Same rationale as HIGHVAL above — df_low
+    #    now applies .filter() followed by its own .orderBy() so that the
+    #    LOWVAL output file is also physically written in descending order
+    #    by amount, faithfully replicating DFSORT OUTFIL behaviour.
     #
     #    Mainframe: OUTFIL FNAMES=LOWVAL,
     #                      INCLUDE=(17,9,PD,LE,+1000000)
+    #               with global SORT FIELDS=(17,9,PD,D) applied to output
     # ------------------------------------------------------------------
     logger.info(
-        "[%s] Applying LOWVAL filter: '%s' <= %d "
-        "(mirrors: OUTFIL FNAMES=LOWVAL, INCLUDE=(17,9,PD,LE,+1000000)).",
+        "[%s] Applying LOWVAL filter: '%s' <= %d then sorting descending "
+        "(mirrors: SORT FIELDS=(17,9,PD,D) + "
+        "OUTFIL FNAMES=LOWVAL, INCLUDE=(17,9,PD,LE,+1000000)).",
         caller,
         AMOUNT,
         THRESHOLD_AMOUNT,
     )
 
-    # PD column note: AMOUNT column holds the decoded signed integer value.
-    df_low: DataFrame = sorted_df.filter(F.col(AMOUNT) <= THRESHOLD_AMOUNT)
+    # FIX #1: Filter first, then orderBy independently on df_low so that
+    # the sort is the terminal operation in the logical plan, guaranteeing
+    # the physical write respects descending order for the LOWVAL output.
+    # FIX #2: .withColumn(VALUE_TIER, F.lit(TIER_LOW)) activates the
+    # previously declared but unused VALUE_TIER / TIER_LOW constants,
+    # tagging each LOWVAL record for lineage and debugging purposes.
+    df_low: DataFrame = (
+        valid_df
+        .filter(F.col(AMOUNT) <= THRESHOLD_AMOUNT)
+        # FIX #1: Independent orderBy on df_low guarantees descending sort
+        # order is physically honoured in the LOWVAL output file.
+        .orderBy(F.col(AMOUNT).desc())
+        # FIX #2: Activate VALUE_TIER tagging — was dead code previously.
+        .withColumn(VALUE_TIER, F.lit(TIER_LOW))
+    )
 
     # ------------------------------------------------------------------
-    # 5. Return both output DataFrames keyed by their OUTFIL FNAMES label.
+    # 4. Return both output DataFrames keyed by their OUTFIL FNAMES label.
     #    Callers write each DataFrame to the appropriate target path or
     #    table (see __main__ block for reference usage).
     # ------------------------------------------------------------------
@@ -439,9 +470,9 @@ if __name__ == "__main__":
     #   )
     # -----------------------------------------------------------------------
 
-    input_path: str = "path/to/wire_work_extrt_seq"          # ← update me
-    high_output_path: str = "path/to/wire_work_high_seq"     # ← update me
-    low_output_path: str = "path/to/wire_work_low_seq"       # ← update me
+    input_path: str = "path/to/wire_work_extrt_seq"          # <- update me
+    high_output_path: str = "path/to/wire_work_high_seq"     # <- update me
+    low_output_path: str = "path/to/wire_work_low_seq"       # <- update me
 
     logger.info("Reading SORTIN from: %s", input_path)
     input_df: DataFrame = spark.read.parquet(input_path)

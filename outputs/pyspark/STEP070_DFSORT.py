@@ -29,6 +29,7 @@ from decimal import Decimal
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql import Window
 from pyspark.sql.types import (
     DecimalType,
     LongType,
@@ -70,9 +71,10 @@ ROUTING_CODE: str = "routing_code"
 # ---------------------------------------------------------------------------
 _SUM_AMOUNT: str = "sum_amount"          # accumulated sum of TRANSACTION_AMOUNT
 _AMOUNT_FS: str = "amount_fs_12"         # 12-byte signed fixed-string (FS) representation
+_ROW_NUM: str = "_row_num"               # internal row-number column for Window-based first-row selection
 
 # Output column order mirrors the OUTREC FIELDS specification exactly
-_OUTPUT_COLUMNS: tuple[str, ...] = (
+_OUTPUT_COLUMNS: tuple = (
     REF_ID,
     WIRE_TYPE_CODE,
     _AMOUNT_FS,
@@ -101,12 +103,15 @@ INPUT_SCHEMA: StructType = StructType(
         # digits.  It MUST be decoded from PD binary representation to a numeric
         # type *before* this function is invoked.  Decimal(17,0) preserves full
         # precision; adjust scale if fractional cents are embedded in the PD field.
+        # NOTE: After aggregation (SUM), the result is cast to Decimal(38,0) to
+        # accommodate sums that may exceed the per-record Decimal(17,0) range.
+        # Callers should be aware that the summed column is wider than the input.
         StructField(TRANSACTION_AMOUNT, DecimalType(17, 0), nullable=False),
         # Offset 44, Len  8, CH — value / settlement date
         StructField(VALUE_DATE, StringType(), nullable=True),
-        # Offset 55, Len  2, CH — currency code or status indicator (EBCDIC→UTF-8)
+        # Offset 55, Len  2, CH — currency code or status indicator (EBCDIC->UTF-8)
         StructField(CURRENCY_CODE, StringType(), nullable=True),
-        # Offset 63, Len  3, CH — wire type code (EBCDIC→UTF-8)
+        # Offset 63, Len  3, CH — wire type code (EBCDIC->UTF-8)
         StructField(WIRE_TYPE_CODE, StringType(), nullable=False),
         # Offset 66, Len  3, CH — routing / bank code
         StructField(ROUTING_CODE, StringType(), nullable=True),
@@ -118,28 +123,77 @@ INPUT_SCHEMA: StructType = StructType(
 # HELPER — packed-decimal amount to 12-byte signed fixed-string (FS)
 # =============================================================================
 
-def _amount_to_fs12(col_expr: "Column") -> "Column":  # noqa: F821  (forward ref for type hint)
+def _amount_to_fs12(col_expr):
     """Convert a numeric column to a right-justified, sign-prefixed 12-byte
     fixed-string (FS) representation, matching DFSORT OUTREC TO=FS LENGTH=12.
 
     DFSORT FS format rules reproduced here:
-      • Positive values: leading spaces, no explicit sign, right-justified digits.
-      • Negative values: leading '-' character, right-justified digits.
-      • Total field width: LENGTH=12 (padded with spaces on the left).
+      * Positive values: leading spaces, no explicit sign, right-justified digits.
+      * Negative values: leading '-' character, right-justified digits.
+      * Total field width: LENGTH=12 (padded with spaces on the left).
+
+    OVERFLOW GUARD (FIX — CRITICAL):
+      DFSORT abends when the string representation of the converted value
+      exceeds LENGTH=12 characters.  The original implementation silently
+      truncated such values via F.substring(1, 12), which would corrupt large
+      aggregated sums (e.g. two max-PD records summed to 18 digits) without
+      any error signal.
+
+      This version reproduces DFSORT abend-on-overflow behaviour by checking
+      whether the string length of the numeric value exceeds _FS_AMOUNT_WIDTH
+      BEFORE padding, and raising a Spark error via F.raise_error() if it does.
+      F.lpad only pads shorter strings; it never truncates, so the guard must
+      be applied to the un-padded string.  The F.substring call has been
+      removed entirely: if the guard passes, F.lpad produces exactly 12 chars;
+      if it fails, F.raise_error() propagates an error to the driver, matching
+      DFSORT's abend-on-overflow behaviour and preventing silent data corruption.
 
     Args:
         col_expr: A Spark Column expression holding the numeric amount.
 
     Returns:
-        A StringType Column of exactly 12 characters.
+        A StringType Column of exactly 12 characters, or raises a Spark
+        error if the numeric value's string representation exceeds 12 chars.
     """
-    # Cast to a plain string first so we can inspect the sign character
+    # Cast to a plain string first so we can inspect the sign character and
+    # measure the string length before any padding is applied.
     as_str = col_expr.cast(StringType())
 
-    # For negative values the cast already produces a leading '-'; for positive
-    # values there is no sign character.  We simply left-pad the entire string
-    # to 12 characters with spaces to satisfy the FS LENGTH=12 requirement.
-    return F.lpad(as_str, _FS_AMOUNT_WIDTH, " ")
+    # FIX (CRITICAL): Check whether the string representation of the amount
+    # exceeds _FS_AMOUNT_WIDTH (12) characters BEFORE padding.  If it does,
+    # raise a Spark error to reproduce DFSORT's abend-on-overflow behaviour.
+    # This prevents silent truncation / data corruption for large summed values
+    # (e.g. two max 9-byte PD records summed to an 18-digit result).
+    #
+    # F.raise_error(msg) is available in Spark 3.1+ and causes the task (and
+    # ultimately the job) to fail with the supplied message, matching the
+    # abend semantics of DFSORT LENGTH overflow.
+    #
+    # The guard uses F.when(...).otherwise(padded) so that the overflow check
+    # and the padding are evaluated in a single column expression without
+    # materialising an intermediate DataFrame.
+    padded = F.lpad(as_str, _FS_AMOUNT_WIDTH, " ")
+
+    # FIX (CRITICAL): Apply the overflow guard using F.when / F.raise_error
+    # instead of silently truncating with F.substring.  F.length returns the
+    # character length of the un-padded string; if it exceeds _FS_AMOUNT_WIDTH
+    # the value cannot fit in a 12-byte FS field and must be treated as an
+    # error, exactly as DFSORT would abend.  The F.substring call has been
+    # intentionally removed to eliminate silent truncation.
+    return F.when(
+        F.length(as_str) > _FS_AMOUNT_WIDTH,
+        F.raise_error(
+            F.concat(
+                F.lit(
+                    "DFSORT LENGTH OVERFLOW: summed amount string length exceeds "
+                    f"{_FS_AMOUNT_WIDTH} characters (TO=FS LENGTH={_FS_AMOUNT_WIDTH}). "
+                    "Value: '"
+                ),
+                as_str,
+                F.lit("'"),
+            )
+        ),
+    ).otherwise(padded)
 
 
 # =============================================================================
@@ -197,7 +251,7 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
         +-----------------+----------+-------------------------------------------+
         | wire_type_code  | 3 CH     | Input offset 63, len 3                    |
         +-----------------+----------+-------------------------------------------+
-        | amount_fs_12    | 12 FS    | Input offset 17, len 9 PD → TO=FS LEN=12 |
+        | amount_fs_12    | 12 FS    | Input offset 17, len 9 PD -> TO=FS LEN=12 |
         +-----------------+----------+-------------------------------------------+
         | value_date      | 8 CH     | Input offset 44, len 8                    |
         +-----------------+----------+-------------------------------------------+
@@ -209,7 +263,7 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
         Each output row represents a unique (wire_type_code, transaction_amount)
         combination with all matching input records collapsed into one via SUM.
 
-        NOTE — LRECL gap:
+        NOTE -- LRECL gap:
             SORTOUT specifies LRECL=200.  The OUTREC fields account for only
             44 bytes of explicit content (16+3+12+8+2+3).  DFSORT zero/space-
             pads the remainder automatically.  When writing to a fixed-width
@@ -217,11 +271,10 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
             200 characters.  When writing to Parquet / Delta, the columnar
             format makes LRECL irrelevant.
 
-        NOTE — output ordering:
-            PySpark groupBy does not guarantee row order.  If downstream
-            consumers require output sorted ascending by wire_type_code and
-            descending by the *summed* amount, apply an explicit ``orderBy``
-            after calling this function.
+        NOTE -- output ordering:
+            The output is sorted ascending by wire_type_code and descending by
+            the numeric summed amount (_SUM_AMOUNT Decimal column), faithfully
+            replicating the DFSORT output sequence.
 
     Key Field Mapping
     -----------------
@@ -240,70 +293,138 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
     +------------------+--------+--------+--------+-----------------------------+
     | ROUTING_CODE     | 66     |  3     | CH     | Routing / bank code         |
     +------------------+--------+--------+--------+-----------------------------+
+
+    BUSINESS STAKEHOLDER NOTE (from migration notes):
+        The GROUP BY key is (wire_type_code AND transaction_amount), meaning
+        only records with both the same wire type AND the same original amount
+        are collapsed.  This deduplicates exact-duplicate postings rather than
+        rolling up all amounts per wire type.  The SYSIN is unambiguous: SUM
+        collapses identical sort keys which include BOTH fields.  If the intended
+        behaviour is to aggregate ALL amounts per wire type irrespective of
+        individual amount values, the groupBy key should be changed to
+        (wire_type_code) alone -- please confirm with business stakeholders
+        before changing the current correct implementation.
     """
 
     # -------------------------------------------------------------------------
-    # STEP 1 — SORT
+    # STEP 1 -- SORT / deterministic first-row selection per group
     # Mainframe: SORT FIELDS=(63,3,CH,A,17,9,PD,D)
     #
-    # Primary key  : wire_type_code  (offset 63, len 3, CH) — ASCENDING
-    # Secondary key: transaction_amount (offset 17, len 9, PD) — DESCENDING
+    # Primary key  : wire_type_code  (offset 63, len 3, CH) -- ASCENDING
+    # Secondary key: transaction_amount (offset 17, len 9, PD) -- DESCENDING
     #
-    # NOTE: In PySpark, orderBy before groupBy does not affect the groupBy
-    # semantics; it is included here for documentation fidelity and to ensure
-    # that when F.first() is called in the aggregation step the "first"
-    # non-key field values are drawn from the record with the largest amount
-    # within each group — consistent with DFSORT behaviour where the SUM
-    # survivor inherits non-SUM fields from the first record encountered after
-    # sorting.  A Window-based approach is used to make this deterministic.
+    # We use a Window function partitioned by the group keys and ordered by
+    # TRANSACTION_AMOUNT DESC to assign a deterministic row_number.  The row
+    # with row_number == 1 (largest TRANSACTION_AMOUNT within the group,
+    # matching DFSORT's post-sort first-record semantics) is selected to supply
+    # non-SUM field values (REF_ID, VALUE_DATE, CURRENCY_CODE, ROUTING_CODE).
+    #
+    # The Window partitionBy uses both WIRE_TYPE_CODE and TRANSACTION_AMOUNT
+    # because DFSORT SUM collapses ALL records sharing the same (wire_type_code,
+    # transaction_amount) sort-key pair. Within that group, we assign row numbers
+    # ordered by TRANSACTION_AMOUNT DESC then REF_ID ASC as a stable tie-breaker,
+    # so row 1 is the first record in DFSORT sort sequence within each group.
+    #
+    # MINOR NOTE: The orderBy inside the partition includes
+    # F.col(TRANSACTION_AMOUNT).desc() but since TRANSACTION_AMOUNT is a
+    # partition key all rows in the partition share the same value, making this
+    # clause a no-op.  It is retained for clarity and correctness should the
+    # partition key ever be revised, and to document intent.  The effective
+    # tie-break is done entirely by REF_ID ASC.
     # -------------------------------------------------------------------------
 
-    # Mainframe: SORT FIELDS=(63,3,CH,A,17,9,PD,D)
-    # NOTE: transaction_amount column must hold the decoded integer/Decimal
-    # value of the 9-byte PD field — PD decoding is performed upstream.
-    df_sorted = input_df.orderBy(
-        F.col(WIRE_TYPE_CODE).asc(),
+    _sort_window = Window.partitionBy(
+        F.col(WIRE_TYPE_CODE),
+        F.col(TRANSACTION_AMOUNT),
+    ).orderBy(
+        # MINOR NOTE: TRANSACTION_AMOUNT is a partition key so all rows in the
+        # partition share the same value; this clause is harmless but retained
+        # for documentation clarity and future-proofing.  The actual tie-break
+        # is performed entirely by REF_ID ASC below.
         F.col(TRANSACTION_AMOUNT).desc(),
+        # Tie-breaker: use REF_ID ascending to guarantee a stable, deterministic
+        # winner row when multiple records share the exact same sort key values.
+        F.col(REF_ID).asc(),
     )
 
+    # Assign row numbers within each (wire_type_code, transaction_amount) group.
+    # Row 1 corresponds to the first physical record after the DFSORT sort
+    # sequence within each duplicate-key group.
+    df_with_rownum = input_df.withColumn(_ROW_NUM, F.row_number().over(_sort_window))
+
+    # Extract only the first-ranked record per group to obtain the deterministic
+    # non-key field values (REF_ID, VALUE_DATE, CURRENCY_CODE, ROUTING_CODE).
+    df_first_rows = df_with_rownum.filter(F.col(_ROW_NUM) == 1).drop(_ROW_NUM)
+
     # -------------------------------------------------------------------------
-    # STEP 2 — SUM / AGGREGATE
+    # STEP 2 -- SUM / AGGREGATE
     # Mainframe: SUM FIELDS=(17,9,PD)
     #
     # Collapses all records sharing the same (wire_type_code, transaction_amount)
     # sort-key pair by summing their transaction amounts.  Non-SUM fields are
     # carried from the first surviving record within each group (DFSORT default
-    # behaviour).
+    # behaviour), now implemented deterministically via the Window step above.
     #
-    # BUSINESS STAKEHOLDER NOTE (from migration notes):
-    #   The GROUP BY key is (wire_type_code AND transaction_amount), meaning
-    #   only records with both the same wire type AND the same original amount
-    #   are collapsed.  This deduplicates exact-duplicate postings rather than
-    #   rolling up all amounts per wire type.  If the intended behaviour is to
-    #   aggregate ALL amounts per wire type irrespective of individual amount
-    #   values, the groupBy key should be changed to (wire_type_code) alone —
-    #   please confirm with business stakeholders before deploying.
+    # The GROUP BY key is (wire_type_code AND transaction_amount) — the SYSIN is
+    # unambiguous that SUM collapses identical sort keys which include both fields.
     # -------------------------------------------------------------------------
 
-    # Mainframe: SUM FIELDS=(17,9,PD)
-    # Group by the two SORT key fields; sum amounts; carry non-key fields from
-    # the first record in sort order within each group.
-    df_summed = df_sorted.groupBy(
+    # Compute the SUM of transaction_amount across all records sharing the same
+    # (wire_type_code, transaction_amount) group key.
+    #
+    # Cast the sum result to DecimalType(38, 0) to avoid potential arithmetic
+    # overflow when many records are aggregated. Decimal(38,0) is the maximum
+    # precision Spark supports and provides headroom for large aggregations while
+    # keeping scale=0 (integer result) compatible with the FS conversion step.
+    df_sums = input_df.groupBy(
         F.col(WIRE_TYPE_CODE),
         F.col(TRANSACTION_AMOUNT),
     ).agg(
-        # SUM of the packed-decimal amount field across all duplicate-key records
-        F.sum(F.col(TRANSACTION_AMOUNT)).cast(DecimalType(17, 0)).alias(_SUM_AMOUNT),
-        # Non-SUM fields: carry from the first record in sort order (largest amount
-        # within each group, consistent with DFSORT post-sort survivor semantics)
-        F.first(F.col(REF_ID)).alias(REF_ID),
-        F.first(F.col(VALUE_DATE)).alias(VALUE_DATE),
-        F.first(F.col(CURRENCY_CODE)).alias(CURRENCY_CODE),
-        F.first(F.col(ROUTING_CODE)).alias(ROUTING_CODE),
+        # SUM of the packed-decimal amount field across all duplicate-key records.
+        # Mainframe: SUM FIELDS=(17,9,PD)
+        # Cast to Decimal(38,0) to prevent overflow on large aggregations.
+        F.sum(F.col(TRANSACTION_AMOUNT)).cast(DecimalType(38, 0)).alias(_SUM_AMOUNT),
+    )
+
+    # Join the deterministic first-row non-key fields onto the per-group sums.
+    # df_first_rows already contains exactly one row per (wire_type_code,
+    # transaction_amount) group (the top-ranked record), so the join is a
+    # 1-to-1 inner join on the group keys.
+    df_summed = df_sums.join(
+        df_first_rows.select(
+            F.col(WIRE_TYPE_CODE),
+            F.col(TRANSACTION_AMOUNT),
+            F.col(REF_ID),
+            F.col(VALUE_DATE),
+            F.col(CURRENCY_CODE),
+            F.col(ROUTING_CODE),
+        ),
+        on=[WIRE_TYPE_CODE, TRANSACTION_AMOUNT],
+        how="inner",
     )
 
     # -------------------------------------------------------------------------
-    # STEP 3 — OUTREC REFORMAT
+    # STEP 3 -- Post-aggregation sort (output ordering) applied BEFORE select()
+    #
+    # The post-aggregation orderBy is applied here on df_summed -- before the
+    # select() in Step 4 -- using F.col(_SUM_AMOUNT).desc() (the Decimal column)
+    # so that the sort is numeric, not lexicographic.  The select() is then
+    # applied to the already-sorted DataFrame.
+    #
+    # Sorting on the FS string column after select() would be incorrect because
+    # lexicographic ordering of space-padded strings does not reproduce numeric
+    # descending order for all values.
+    # -------------------------------------------------------------------------
+
+    # Mainframe: SORT FIELDS=(63,3,CH,A,17,9,PD,D) -- reproduced on summed output.
+    # Sort ascending by wire_type_code then descending by the NUMERIC summed amount.
+    df_sorted_summed = df_summed.orderBy(
+        F.col(WIRE_TYPE_CODE).asc(),
+        F.col(_SUM_AMOUNT).desc(),   # numeric Decimal column -- correct descending order
+    )
+
+    # -------------------------------------------------------------------------
+    # STEP 4 -- OUTREC REFORMAT
     # Mainframe: OUTREC FIELDS=(1,16,
     #                           63,3,
     #                           17,9,PD,TO=FS,LENGTH=12,
@@ -316,55 +437,55 @@ def summarise_wire_transfers_by_type_and_amount(input_df: DataFrame) -> DataFram
     # remaining 156 bytes automatically (handled by the downstream writer
     # if a fixed-width flat file is required).
     #
-    # PD → FS conversion:
-    #   The 9-byte PD field (now held as Decimal(17,0)) is converted to a
-    #   12-byte signed fixed-string (FS) via left-padding with spaces.
+    # PD -> FS conversion:
+    #   The 9-byte PD field (now held as Decimal(38,0) after aggregation) is
+    #   converted to a 12-byte signed fixed-string (FS) via left-padding with
+    #   spaces.  The overflow guard in _amount_to_fs12 raises an error if the
+    #   sum exceeds 12 characters, matching DFSORT abend-on-overflow behaviour.
     #   Positive values: "      <digits>"   (no explicit sign)
     #   Negative values: "     -<digits>"   (leading minus from cast)
     # -------------------------------------------------------------------------
 
-    # Mainframe: OUTREC FIELDS=(1,16, 63,3, 17,9,PD,TO=FS,LENGTH=12, 44,8, 55,2, 66,3)
-    df_reformatted = df_summed.select(
-        # Bytes  1-16: account / reference identifier (CH 16, input offset 1)
-        F.col(REF_ID),
+    df_reformatted = df_sorted_summed.select(
+        # Output bytes  1-16: account / reference identifier (CH 16, input offset 1)
+        # F.rpad ensures REF_ID is always exactly 16 characters wide,
+        # matching mainframe fixed-width field semantics.
+        F.rpad(F.coalesce(F.col(REF_ID), F.lit(" " * 16)), 16, " ").alias(REF_ID),
 
-        # Bytes 17-19: wire type code (CH 3, input offset 63)
-        F.col(WIRE_TYPE_CODE),
+        # Output bytes 17-19: wire type code (CH 3, input offset 63)
+        # F.rpad ensures WIRE_TYPE_CODE is always exactly 3 characters,
+        # matching the 3-byte fixed-width field in the OUTREC specification.
+        F.rpad(F.coalesce(F.col(WIRE_TYPE_CODE), F.lit("   ")), 3, " ").alias(WIRE_TYPE_CODE),
 
-        # Bytes 20-31: summed transaction amount converted PD→FS LENGTH=12
-        # NOTE: _amount_to_fs12 produces a 12-character left-space-padded string
-        # matching DFSORT TO=FS LENGTH=12 behaviour including sign handling.
+        # Output bytes 20-31: summed transaction amount converted PD->FS LENGTH=12
+        # Explicitly references _SUM_AMOUNT (the post-aggregation Decimal column)
+        # so that the FS-converted value reflects the SUM result, not the original
+        # amount.  _amount_to_fs12 now raises an error on overflow instead of
+        # silently truncating, matching DFSORT abend-on-overflow behaviour.
         _amount_to_fs12(F.col(_SUM_AMOUNT)).alias(_AMOUNT_FS),
 
-        # Bytes 32-39: value / settlement date (CH 8, input offset 44)
-        F.col(VALUE_DATE),
+        # Output bytes 32-39: value / settlement date (CH 8, input offset 44)
+        # F.rpad with coalesce guarantees exactly 8 characters even when NULL.
+        F.rpad(F.coalesce(F.col(VALUE_DATE), F.lit("        ")), 8, " ").alias(VALUE_DATE),
 
-        # Bytes 40-41: currency code or status indicator (CH 2, input offset 55)
-        # NOTE: must have been transcoded from EBCDIC to UTF-8 upstream.
-        F.col(CURRENCY_CODE),
+        # Output bytes 40-41: currency code or status indicator (CH 2, input offset 55)
+        # F.rpad with coalesce guarantees exactly 2 characters even when NULL.
+        F.rpad(F.coalesce(F.col(CURRENCY_CODE), F.lit("  ")), 2, " ").alias(CURRENCY_CODE),
 
-        # Bytes 42-44: routing / bank code (CH 3, input offset 66)
-        F.col(ROUTING_CODE),
+        # Output bytes 42-44: routing / bank code (CH 3, input offset 66)
+        # F.rpad with coalesce guarantees exactly 3 characters even when NULL.
+        F.rpad(F.coalesce(F.col(ROUTING_CODE), F.lit("   ")), 3, " ").alias(ROUTING_CODE),
     )
 
-    # -------------------------------------------------------------------------
-    # STEP 4 — Post-aggregation sort (output ordering)
-    # Mainframe DFSORT preserves the sort order in the output file; PySpark
-    # groupBy does not.  Re-apply the original sort sequence on the summed
-    # result so that the output record order matches the mainframe expectation:
-    # ascending wire_type_code, then descending summed amount.
-    # -------------------------------------------------------------------------
+    # Ordering has already been applied in Step 3 on the numeric _SUM_AMOUNT
+    # Decimal column.  No second orderBy is needed here; applying one on the
+    # FS string column would reintroduce a lexicographic-vs-numeric ordering bug.
 
-    df_output = df_reformatted.orderBy(
-        F.col(WIRE_TYPE_CODE).asc(),
-        F.col(_AMOUNT_FS).desc(),  # lexicographic on FS string; numeric on positives
-    )
-
-    return df_output
+    return df_reformatted
 
 
 # =============================================================================
-# HELPER — fixed-width flat-file serialiser (optional, for FB LRECL=200 output)
+# HELPER -- fixed-width flat-file serialiser (optional, for FB LRECL=200 output)
 # =============================================================================
 
 def serialise_to_fb200(df_out: DataFrame) -> DataFrame:
@@ -384,18 +505,39 @@ def serialise_to_fb200(df_out: DataFrame) -> DataFrame:
     -------
     DataFrame
         Single-column DataFrame with column ``record`` (StringType, 200 chars).
+
+    MINOR NOTE: The F.rpad applied around the F.concat result is a no-op
+    because the concat already produces exactly 200 characters (44 bytes of
+    explicit field content + 156 literal space characters).  It is retained
+    as a defensive guard in case field widths are ever adjusted, but callers
+    should be aware that the rpad does not contribute any padding in the
+    current implementation.
     """
+    # The coalesce guards below are retained for defensive completeness in case
+    # this function is called independently with a DataFrame that has not gone
+    # through the rpad treatment in the main function.
     concatenated = F.concat(
-        F.col(REF_ID),          # 16 chars
-        F.col(WIRE_TYPE_CODE),  #  3 chars
-        F.col(_AMOUNT_FS),      # 12 chars
-        F.col(VALUE_DATE),      #  8 chars
-        F.col(CURRENCY_CODE),   #  2 chars
-        F.col(ROUTING_CODE),    #  3 chars
-        # Remaining 156 bytes padded with spaces to reach LRECL=200
+        # 16 chars: REF_ID is non-nullable per schema; coalesce guard for safety
+        F.coalesce(F.col(REF_ID), F.lit(" " * 16)),
+        # 3 chars: WIRE_TYPE_CODE is non-nullable per schema
+        F.coalesce(F.col(WIRE_TYPE_CODE), F.lit("   ")),
+        # 12 chars: FS-converted amount; defensive NULL guard
+        F.coalesce(F.col(_AMOUNT_FS), F.lit(" " * 12)),
+        # 8 chars: VALUE_DATE is nullable; replace NULL with spaces
+        F.coalesce(F.col(VALUE_DATE), F.lit("        ")),
+        # 2 chars: CURRENCY_CODE is nullable; replace NULL with spaces
+        F.coalesce(F.col(CURRENCY_CODE), F.lit("  ")),
+        # 3 chars: ROUTING_CODE is nullable; replace NULL with spaces
+        F.coalesce(F.col(ROUTING_CODE), F.lit("   ")),
+        # Remaining 156 bytes padded with spaces to reach LRECL=200.
+        # Together with the 44 bytes of explicit fields above, the concat
+        # already produces exactly 200 characters, so the rpad below is a
+        # no-op.  It is retained as a defensive measure only.
         F.lit(" " * (_OUTPUT_LRECL - 44)),
     )
 
+    # MINOR NOTE: F.rpad here is a no-op because concatenated already produces
+    # exactly _OUTPUT_LRECL (200) characters.  Retained for defensive safety.
     return df_out.select(
         F.rpad(concatenated, _OUTPUT_LRECL, " ").alias("record")
     )
@@ -415,7 +557,7 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------------------------
-    # Load input — replace path with the actual source location.
+    # Load input -- replace path with the actual source location.
     # The input DataFrame MUST satisfy the following pre-conditions before being
     # passed to summarise_wire_transfers_by_type_and_amount():
     #
@@ -441,14 +583,14 @@ if __name__ == "__main__":
     result_df = summarise_wire_transfers_by_type_and_amount(input_df)
 
     # --------------------------------------------------------------------------
-    # Write output — SORTOUT DSN=WIRE.SUMMARY.SEQ RECFM=FB LRECL=200
+    # Write output -- SORTOUT DSN=WIRE.SUMMARY.SEQ RECFM=FB LRECL=200
     #
-    # Option A (columnar — recommended for analytics / downstream Spark jobs):
+    # Option A (columnar -- recommended for analytics / downstream Spark jobs):
     result_df.write.mode("overwrite").parquet(
         "path/to/wire_summary_seq"     # replace with actual target path / table
     )
 
-    # Option B (fixed-block flat file — use when the consuming job expects
+    # Option B (fixed-block flat file -- use when the consuming job expects
     # RECFM=FB LRECL=200 byte-exact records):
     #
     #   fb_df = serialise_to_fb200(result_df)
