@@ -26,13 +26,40 @@
 #
 # NODE SHAPES USED:
 #   Datasets : [("DATASET.NAME")]   — cylinder shape (looks like a drum)
-#   Steps    : ["STEP\n[UTILITY]"]  — rectangle
+#   Steps    : ["STEP<br/>UTILITY"] — rectangle
 #   Color-coded by utility type via classDef.
 #
 # OUTPUT:
 #   A string containing the full Mermaid diagram source.
 #   Saved as outputs/wire_payment_batch_lineage.mmd
 #   Also embedded inside the Markdown migration spec.
+#
+# CHANGE LOG (lineage completeness fix):
+#   1. get_step_files: DD-statement datasets are now merged with the Phase 3
+#      lists on each side (union). Previously the DD statements were used
+#      only when BOTH input_files and output_files were empty, so a step
+#      with partial Phase 3 data lost datasets, including temporary
+#      datasets (&&NAME) that link one step to the next.
+#   2. extract_files_from_dd: DISP is now parsed properly.
+#        - DISP=(,PASS) and DISP=(,CATLG) are NEW (output). The old
+#          docstring listed (,PASS) as input, which was wrong.
+#        - DISP=OLD is input, DISP=MOD is output. Both were dropped before.
+#        - DD name conventions are checked BEFORE DISP, so SORTOUT with
+#          DISP=SHR is an output, not an input.
+#        - Temporary datasets (&&NAME) are kept. They carry the lineage
+#          between steps and were dropped before, which broke the chain.
+#        - Only SYS1. and SYS2. datasets are skipped, not every DSN that
+#          starts with SYS.
+#        - The DD parameter text is read from several possible key names
+#          (parameters, params, raw, dsn, disp) in case the Phase 2 parser
+#          uses a different key than "parameters".
+#   3. generate_mermaid_diagram:
+#        - dataset node IDs get a DS_ prefix and collisions are resolved,
+#          so a dataset can never clash with a step ID or another dataset.
+#        - step labels use <br/> instead of \n.
+#        - unknown utility types fall back to the PROGRAM colour class.
+#        - a warning lists steps for which no datasets were found, and
+#          prints the DD keys of the first such step to help diagnosis.
 # =============================================================================
 
 
@@ -41,8 +68,8 @@
 # =============================================================================
 
 # re — built into Python.
-# Used to: sanitize dataset names for use as Mermaid node IDs.
-# Mermaid node IDs cannot contain dots, spaces, or special characters.
+# Used to: sanitize dataset names for use as Mermaid node IDs, and to parse
+# DSN and DISP values out of DD statement text.
 import re
 
 
@@ -103,10 +130,70 @@ def sanitize_node_id(name):
     return sanitized
 
 
+def dataset_node_id(dataset_name):
+    """
+    Builds the base Mermaid node ID for a dataset.
+
+    The DS_ prefix keeps dataset IDs separate from step IDs and avoids
+    Mermaid reserved words (for example a dataset named END).
+    Temporary datasets (&&NAME) get a DS_TMP_ prefix.
+
+    Parameters:
+        dataset_name : dataset name as found in the DD statement
+
+    Returns:
+        A sanitized node ID string.
+    """
+
+    if dataset_name.startswith("&&"):
+        return "DS_TMP_" + sanitize_node_id(dataset_name[2:])
+    return "DS_" + sanitize_node_id(dataset_name)
+
+
+def dataset_display_name(dataset_name):
+    """
+    Returns the label shown inside the dataset cylinder.
+
+    Temporary datasets are shown as "(temp) NAME". Double quotes are
+    replaced because they would terminate the Mermaid label string.
+    """
+
+    if dataset_name.startswith("&&"):
+        label = f"(temp) {dataset_name[2:]}"
+    else:
+        label = dataset_name
+    return label.replace('"', "'")
+
+
 # =============================================================================
 # SECTION 4 — FILE EXTRACTOR
 # Extracts input and output file names from decoded and original step data.
 # =============================================================================
+
+# DD names that never carry a dataset relevant to lineage
+SKIP_DDNAMES = {
+    "SYSPRINT", "SYSOUT", "SYSABEND", "SYSUDUMP", "SYSIN",
+    "STEPLIB", "JOBLIB", "SYSTSPRT", "SYSTSIN",
+    "TOOLIN", "TOOLMSG", "DFSMSG", "SYMNAMES", "SYMNOUT",
+    "SYSCNTL", "CEEOPTS", "SYSMDUMP",
+}
+
+# DD name conventions. Checked before DISP.
+INPUT_DD_PATTERN = re.compile(
+    r'^(SYSUT1|SORTIN\d*|SEQIN|VSAMIN|INDD|INPUT\d*|INFILE\d*|IN\d*)$'
+)
+OUTPUT_DD_PATTERN = re.compile(
+    r'^(SYSUT2|SORTOUT|SORTOF\d*|SEQOUT|VSAMOUT|OUTDD|OUTPUT\d*|OUTFILE\d*|'
+    r'OUT\d*|HIGHVAL|LOWVAL)$'
+)
+
+# Datasets that are system libraries, not business data
+SYSTEM_DSN_PREFIXES = ("SYS1.", "SYS2.")
+
+# Keys the Phase 2 parser may use for the DD parameter text
+PARAMETER_KEYS = ("parameters", "params", "parm_string", "raw",
+                  "text", "statement", "line")
+
 
 def get_step_files(decoded_step, original_step):
     """
@@ -115,8 +202,12 @@ def get_step_files(decoded_step, original_step):
     For decoded steps (Phase 3 success), uses the input_files and
     output_files lists from the decoded result.
 
-    For skipped steps (IEBGENER DUMMY, PROGRAM), reads the DD statements
-    from the original Phase 2 parsed step.
+    The DD statements from the original Phase 2 parsed step are then
+    merged in on each side: any dataset found in a DD statement that is
+    not already in the Phase 3 list is added. This matters for temporary
+    datasets (&&NAME) and for steps where Phase 3 listed only some of the
+    files, because a missing dataset breaks the lineage chain between
+    steps.
 
     Parameters:
         decoded_step  : decoded result dict from Phase 3 (may have empty files)
@@ -126,37 +217,126 @@ def get_step_files(decoded_step, original_step):
         A tuple of (input_files, output_files) — both lists of strings.
     """
 
-    utility_type = decoded_step.get("utility_type", "")
-    decode_status = decoded_step.get("decode_status", "")
+    input_files  = list(decoded_step.get("input_files", []) or [])
+    output_files = list(decoded_step.get("output_files", []) or [])
 
-    # For successfully decoded steps, use Phase 3 results directly
-    input_files  = decoded_step.get("input_files", [])
-    output_files = decoded_step.get("output_files", [])
+    # Merge in datasets found in the DD statements (union, Phase 3 first)
+    if original_step:
+        dd_inputs, dd_outputs = extract_files_from_dd(original_step)
+        for name in dd_inputs:
+            if name not in input_files:
+                input_files.append(name)
+        for name in dd_outputs:
+            if name not in output_files:
+                output_files.append(name)
 
-    # If Phase 3 did not populate file lists, extract from DD statements
-    if not input_files and not output_files and original_step:
-        input_files, output_files = extract_files_from_dd(original_step)
+    # Filter out non-dataset entries like SYSOUT=*, SYSPRINT, DUMMY
+    def is_dataset(name):
+        upper = str(name).upper().strip()
+        return bool(upper) and not (
+            upper.startswith("SYSOUT")
+            or upper.startswith("SYSPRINT")
+            or upper in {"DUMMY", "NULLFILE"}
+        )
 
-    # Filter out non-dataset entries like SYSOUT=* or SYSPRINT
-    input_files  = [f for f in input_files  if not f.upper().startswith("SYSOUT")
-                    and not f.upper().startswith("SYSPRINT")]
-    output_files = [f for f in output_files if not f.upper().startswith("SYSOUT")
-                    and not f.upper().startswith("SYSPRINT")]
+    input_files  = [f for f in input_files  if is_dataset(f)]
+    output_files = [f for f in output_files if is_dataset(f)]
 
     return input_files, output_files
+
+
+def read_dd_fields(dd):
+    """
+    Returns (ddname, parameter_text) for one DD statement dictionary.
+
+    The parameter text is upper-cased. If the Phase 2 parser stored the
+    DSN or DISP under their own keys instead of inside one parameter
+    string, they are added to the text so the same regexes work.
+    """
+
+    ddname = str(dd.get("ddname") or dd.get("dd_name") or dd.get("name") or "")
+    ddname = ddname.upper().strip()
+
+    text = ""
+    for key in PARAMETER_KEYS:
+        value = dd.get(key)
+        if isinstance(value, (list, tuple)):
+            value = ",".join(str(v) for v in value)
+        if isinstance(value, str) and value.strip():
+            text = value
+            break
+    text = text.upper()
+
+    if "DSN=" not in text and "DSNAME=" not in text:
+        for key in ("dsn", "dsname", "dataset"):
+            if dd.get(key):
+                text += f",DSN={str(dd[key]).upper()}"
+                break
+
+    if "DISP=" not in text and dd.get("disp"):
+        text += f",DISP={str(dd['disp']).upper()}"
+
+    return ddname, text
+
+
+def parse_disp_status(parameter_text):
+    """
+    Returns the DISP status (first sub-parameter) from DD parameter text.
+
+    Examples:
+        DISP=SHR                       → "SHR"
+        DISP=(OLD,KEEP)                → "OLD"
+        DISP=(NEW,CATLG,DELETE)        → "NEW"
+        DISP=(,PASS)                   → "NEW"   (omitted status defaults to NEW)
+        DISP=(MOD,CATLG)               → "MOD"
+        (no DISP at all)               → "NEW"   (JCL default)
+    """
+
+    match = re.search(r'DISP=(\([^)]*\)|[A-Z]+)', parameter_text)
+    if not match:
+        return "NEW"
+
+    inner = match.group(1).strip("()")
+    first = inner.split(",")[0].strip()
+    return first if first else "NEW"
+
+
+def classify_dd(ddname, parameter_text):
+    """
+    Classifies one DD as "input", "output", or None (cannot tell).
+
+    Order of checks:
+        1. DD name conventions (SORTIN, SYSUT1, SORTOUT, SYSUT2, ...)
+        2. DISP status: SHR/OLD → input, NEW/MOD → output
+    """
+
+    if INPUT_DD_PATTERN.match(ddname):
+        return "input"
+    if OUTPUT_DD_PATTERN.match(ddname):
+        return "output"
+
+    status = parse_disp_status(parameter_text)
+    if status in ("SHR", "OLD"):
+        return "input"
+    if status in ("NEW", "MOD"):
+        return "output"
+
+    return None
 
 
 def extract_files_from_dd(original_step):
     """
     Extracts input and output dataset names from a step's DD statements.
 
-    Uses heuristics to classify each DD as input or output:
-        - DISP=SHR or DISP=(,PASS) → input (reading existing dataset)
-        - DISP=(NEW,... → output (creating new dataset)
-        - SYSUT1 → input (IEBGENER convention)
-        - SYSUT2 → output (IEBGENER convention)
-        - SORTIN  → input (DFSORT convention)
-        - SORTOUT → output (DFSORT convention)
+    Classification (see classify_dd):
+        - DD name conventions first: SYSUT1/SORTIN → input,
+          SYSUT2/SORTOUT/OUTFIL DDs → output.
+        - Then DISP status: SHR or OLD → input, NEW or MOD → output.
+        - DISP=(,PASS) means NEW,PASS, so it is an output passed on to a
+          later step. A later DD with DISP=(OLD,...) on the same &&name
+          reads it, which links the two steps in the diagram.
+
+    Temporary datasets (&&NAME) are kept so lineage continues across steps.
 
     Parameters:
         original_step : step dictionary from Phase 2 parser
@@ -168,38 +348,31 @@ def extract_files_from_dd(original_step):
     input_files  = []
     output_files = []
 
-    skip_ddnames = {"SYSPRINT", "SYSOUT", "SYSABEND", "SYSIN",
-                    "STEPLIB", "JOBLIB", "SYSUDUMP"}
-
     for dd in original_step.get("dd_statements", []):
 
-        ddname     = dd.get("ddname", "").upper()
-        parameters = dd.get("parameters", "").upper()
+        ddname, parameters = read_dd_fields(dd)
 
-        if ddname in skip_ddnames:
+        if ddname in SKIP_DDNAMES:
             continue
 
         # Extract DSN value
-        dsn_match = re.search(r'DSN=([^,\s]+)', parameters, re.IGNORECASE)
+        dsn_match = re.search(r'DSN(?:AME)?=([^,\s)]+(?:\([^)]*\))?)',
+                              parameters)
         if not dsn_match:
             continue
 
         dsn = dsn_match.group(1).strip()
 
-        # Skip temporary datasets (&&name) and special datasets
-        if dsn.startswith("&&") or dsn.startswith("SYS"):
+        # Skip system libraries
+        if dsn.startswith(SYSTEM_DSN_PREFIXES):
             continue
 
-        # Classify as input or output based on DISP and ddname conventions
-        if (ddname in {"SYSUT1", "SORTIN", "SEQIN", "VSAMIN", "INPUT"}
-                or "DISP=SHR" in parameters
-                or "DISP=(SHR" in parameters):
+        direction = classify_dd(ddname, parameters)
+
+        if direction == "input":
             if dsn not in input_files:
                 input_files.append(dsn)
-
-        elif (ddname in {"SYSUT2", "SORTOUT", "SEQOUT", "VSAMOUT",
-                          "OUTPUT", "HIGHVAL", "LOWVAL"}
-              or "DISP=(NEW" in parameters):
+        elif direction == "output":
             if dsn not in output_files:
                 output_files.append(dsn)
 
@@ -209,6 +382,40 @@ def extract_files_from_dd(original_step):
 # =============================================================================
 # SECTION 5 — DIAGRAM BUILDER
 # =============================================================================
+
+def register_dataset(dataset_name, defined_datasets, used_ids):
+    """
+    Returns the node ID for a dataset, creating it on first use.
+
+    If two different dataset names sanitize to the same ID, a numeric
+    suffix is added so they remain separate nodes.
+    """
+
+    if dataset_name in defined_datasets:
+        return defined_datasets[dataset_name]
+
+    base_id = dataset_node_id(dataset_name)
+    node_id = base_id
+    counter = 2
+    while node_id in used_ids:
+        node_id = f"{base_id}_{counter}"
+        counter += 1
+
+    used_ids.add(node_id)
+    defined_datasets[dataset_name] = node_id
+    return node_id
+
+
+def utility_class_name(utility_type):
+    """
+    Returns the Mermaid class name for a utility type. Unknown types use
+    the PROGRAM class so the class reference always exists.
+    """
+
+    if utility_type in UTILITY_COLOURS:
+        return utility_type.lower()
+    return "program"
+
 
 def generate_mermaid_diagram(job_name, all_steps_data):
     """
@@ -235,19 +442,19 @@ def generate_mermaid_diagram(job_name, all_steps_data):
         The complete Mermaid diagram as a string.
     """
 
-    # We build the diagram in four parts:
+    # We build the diagram in these parts:
     #   1. classDef colour definitions
     #   2. Dataset node definitions
     #   3. Step node definitions
     #   4. Edge definitions (arrows)
     #   5. Class assignments (apply colours)
 
-    # Track which datasets and steps we have already defined
-    # to avoid duplicate node definitions in the Mermaid source
-    defined_datasets = {}   # dataset_name → sanitized_id
-    step_utilities   = {}   # step_name → utility_type
+    defined_datasets = {}   # dataset_name → node id
+    used_ids         = set()
+    all_edges        = []   # list of (from_id, to_id, label) tuples
 
-    all_edges        = []   # list of (from_id, to_id) tuples
+    steps_without_files = []   # step names that produced no datasets
+    first_empty_original = None
 
     # -------------------------------------------------------------------------
     # Pass 1: collect all nodes and edges
@@ -257,32 +464,38 @@ def generate_mermaid_diagram(job_name, all_steps_data):
         decoded_step  = step_data.get("decoded_step", {})
         original_step = step_data.get("original_step", {})
 
-        step_name    = decoded_step.get("step_name", "UNKNOWN")
-        utility_type = decoded_step.get("utility_type", "PROGRAM")
-        step_id      = sanitize_node_id(step_name)
-
-        step_utilities[step_name] = utility_type
+        step_name = decoded_step.get("step_name", "UNKNOWN")
+        step_id   = sanitize_node_id(step_name)
 
         # Get input and output files for this step
         input_files, output_files = get_step_files(decoded_step, original_step)
 
-        # Register input dataset nodes
-        for dataset_name in input_files:
-            ds_id = sanitize_node_id(dataset_name)
-            if dataset_name not in defined_datasets:
-                defined_datasets[dataset_name] = ds_id
+        if not input_files and not output_files:
+            steps_without_files.append(step_name)
+            if first_empty_original is None:
+                first_empty_original = original_step
 
-            # Edge: dataset → step
+        # Input datasets: dataset → step
+        for dataset_name in input_files:
+            ds_id = register_dataset(dataset_name, defined_datasets, used_ids)
             all_edges.append((ds_id, step_id, ""))
 
-        # Register output dataset nodes
+        # Output datasets: step → dataset
         for dataset_name in output_files:
-            ds_id = sanitize_node_id(dataset_name)
-            if dataset_name not in defined_datasets:
-                defined_datasets[dataset_name] = ds_id
-
-            # Edge: step → dataset
+            ds_id = register_dataset(dataset_name, defined_datasets, used_ids)
             all_edges.append((step_id, ds_id, ""))
+
+    # Diagnostics: tell the user which steps have no lineage and why
+    if steps_without_files:
+        print(f"  [WARN] No datasets found for {len(steps_without_files)} "
+              f"step(s): {', '.join(steps_without_files)}")
+        dd_list = (first_empty_original or {}).get("dd_statements", [])
+        if not dd_list:
+            print("  [WARN] The Phase 2 step has no 'dd_statements' entries. "
+                  "Check the key name in the parser output.")
+        else:
+            print(f"  [WARN] DD keys available in the first such step: "
+                  f"{sorted(dd_list[0].keys())}")
 
     # -------------------------------------------------------------------------
     # Pass 2: build the Mermaid source string
@@ -290,9 +503,9 @@ def generate_mermaid_diagram(job_name, all_steps_data):
     lines = []
 
     # Diagram type and direction
-    lines.append(f"---")
-    lines.append(f"title: {job_name} — Data Lineage")
-    lines.append(f"---")
+    lines.append("---")
+    lines.append(f'title: "{job_name} — Data Lineage"')
+    lines.append("---")
     lines.append("graph LR")
     lines.append("")
 
@@ -317,22 +530,24 @@ def generate_mermaid_diagram(job_name, all_steps_data):
     # Dataset node definitions — cylinder shape using [(" ")]
     lines.append("    %% Dataset nodes (cylinders)")
     for dataset_name, ds_id in sorted(defined_datasets.items()):
-        # Truncate long dataset names to keep diagram readable
-        display_name = dataset_name
+        display_name = dataset_display_name(dataset_name)
         lines.append(f'    {ds_id}[("{display_name}")]')
     lines.append("")
 
     # Step node definitions — rectangle using [" "]
     lines.append("    %% Step nodes (rectangles)")
     for step_data in all_steps_data:
-        decoded_step  = step_data.get("decoded_step", {})
-        step_name     = decoded_step.get("step_name", "UNKNOWN")
-        utility_type  = decoded_step.get("utility_type", "PROGRAM")
-        pgm           = decoded_step.get("pgm", "")
-        step_id       = sanitize_node_id(step_name)
+        decoded_step = step_data.get("decoded_step", {})
+        step_name    = decoded_step.get("step_name", "UNKNOWN")
+        utility_type = decoded_step.get("utility_type", "PROGRAM")
+        pgm          = decoded_step.get("pgm", "")
+        step_id      = sanitize_node_id(step_name)
 
-        # Two-line label: step name on top, utility/pgm on bottom
-        label = f"{step_name}\\n{utility_type}"
+        # Two-line label: step name on top, utility (or program name) below
+        second_line = utility_type
+        if utility_type == "PROGRAM" and pgm:
+            second_line = pgm
+        label = f"{step_name}<br/>{second_line}".replace('"', "'")
         lines.append(f'    {step_id}["{label}"]')
     lines.append("")
 
@@ -355,7 +570,6 @@ def generate_mermaid_diagram(job_name, all_steps_data):
     # Apply colour classes to dataset nodes
     lines.append("    %% Apply colour classes")
     if defined_datasets:
-        dataset_ids = " ".join(defined_datasets.values())
         lines.append(f"    class {','.join(defined_datasets.values())} dataset")
 
     # Apply colour classes to step nodes
@@ -364,7 +578,6 @@ def generate_mermaid_diagram(job_name, all_steps_data):
         step_name    = decoded_step.get("step_name", "UNKNOWN")
         utility_type = decoded_step.get("utility_type", "PROGRAM")
         step_id      = sanitize_node_id(step_name)
-        class_name   = utility_type.lower()
-        lines.append(f"    class {step_id} {class_name}")
+        lines.append(f"    class {step_id} {utility_class_name(utility_type)}")
 
     return "\n".join(lines)

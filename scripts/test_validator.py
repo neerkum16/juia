@@ -11,8 +11,10 @@
 #      a. Runs initial validation via Claude
 #      b. If FAIL: runs self-correction loop (up to 3 retries)
 #      c. Saves the final validation status
-#   4. Saves a full validation report to outputs/validation_report.json
-#   5. Prints a summary table
+#   4. Merges this run's results into outputs/validation_report.json
+#      (results from previous runs are preserved; same step name is
+#      overwritten by the newest result)
+#   5. Prints a summary table for this run
 #
 # HOW TO RUN:
 #   source venv/bin/activate
@@ -24,8 +26,9 @@
 #   Any FAIL triggers automatic correction and re-validation.
 #
 # OUTPUT FILES:
-#   outputs/validation_report.json   — full validation results per step
+#   outputs/validation_report.json   — accumulated validation results per step
 #   outputs/pyspark/*.bak_N          — backup of any corrected files
+#   outputs/pyspark/*.validated      — marker written after a PASS
 # =============================================================================
 
 
@@ -202,12 +205,12 @@ def print_validation_result(result, index, total):
 
 def print_summary_table(all_results):
     """
-    Prints a compact summary table of all validation results.
+    Prints a compact summary table of the validation results from this run.
     """
 
     print()
     print("=" * 65)
-    print("  VALIDATION SUMMARY")
+    print("  VALIDATION SUMMARY (this run)")
     print("=" * 65)
     print()
     print(f"  {'#':<4} {'Step':<12} {'Utility':<12} "
@@ -255,34 +258,82 @@ def print_summary_table(all_results):
 # SECTION 5 — REPORT SAVER
 # =============================================================================
 
-def save_validation_report(all_results, report_path):
+def merge_with_existing_report(new_results, report_path):
     """
-    Saves the full validation results to a JSON report file.
+    Merges this run's results into any existing report on disk.
+
+    Results from previous runs are preserved. If a step appears in both
+    the existing report and the new results, the new result replaces it.
+    The merged list is sorted by step name for a stable report layout.
 
     Parameters:
-        all_results : list of validation result dicts
+        new_results : list of validation result dicts from this run
+        report_path : path of the existing JSON report (may not exist)
+
+    Returns:
+        The merged list of validation result dicts.
+    """
+
+    merged = {}
+
+    if os.path.exists(report_path):
+        try:
+            with open(report_path, encoding="utf-8") as f:
+                existing_data = json.load(f)
+            for step in existing_data.get("steps", []):
+                name = step.get("step_name", "")
+                if name:
+                    merged[name] = step
+        except Exception as error:
+            print(f"  [WARN] Could not read existing report "
+                  f"({error}) — starting a new one")
+
+    # New results overwrite existing results for the same step name
+    for result in new_results:
+        name = result.get("step_name", "")
+        if name:
+            merged[name] = result
+
+    return [merged[name] for name in sorted(merged)]
+
+
+def save_validation_report(all_results, report_path):
+    """
+    Saves the validation results to a JSON report file.
+
+    Results are merged with any existing report so the report accumulates
+    across runs. This keeps the report in sync with the .validated marker
+    files, which cause already-passed steps to be skipped on later runs.
+
+    Parameters:
+        all_results : list of validation result dicts from this run
         report_path : path where the JSON report is saved
     """
 
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
 
-    pass_count  = sum(1 for r in all_results if r.get("validation_status") == "PASS")
-    fail_count  = sum(1 for r in all_results if r.get("validation_status") == "FAIL")
-    total_fixes = sum(r.get("corrections_applied", 0) for r in all_results)
+    # Merge BEFORE computing totals so the counts cover the whole report
+    merged_results = merge_with_existing_report(all_results, report_path)
+
+    pass_count  = sum(1 for r in merged_results if r.get("validation_status") == "PASS")
+    fail_count  = sum(1 for r in merged_results if r.get("validation_status") == "FAIL")
+    total_fixes = sum(r.get("corrections_applied", 0) for r in merged_results)
 
     report = {
         "job_name"            : "WIREPAY",
-        "total_steps_validated": len(all_results),
+        "total_steps_validated": len(merged_results),
         "pass_count"          : pass_count,
         "fail_count"          : fail_count,
         "total_corrections"   : total_fixes,
-        "steps"               : all_results
+        "steps"               : merged_results
     }
 
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
     print(f"  Validation report saved: {report_path}")
+    print(f"  Report now covers {len(merged_results)} step(s) "
+          f"({len(all_results)} from this run)")
 
 
 # =============================================================================
