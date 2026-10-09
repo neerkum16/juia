@@ -43,6 +43,18 @@
 #     "correction_hint"    : "",
 #     "validate_status"    : "success"
 #   }
+#
+# CHANGE LOG (parse-failure fix):
+#   1. build_validation_prompt: STEP A / STEP B reworded so Claude performs
+#      them internally and does not write them out. A FINAL REMINDER is
+#      appended as the last lines of the prompt.
+#   2. parse_validation_response: no longer slices from the first "{" in the
+#      text. It now tries every "{" as a start position using
+#      json.JSONDecoder.raw_decode and returns the first dict that looks like
+#      the validation report. Set literals such as {R01-R12, R14, R15} in
+#      analysis text are skipped.
+#   3. validate_generated_code: warns when the response was cut off by
+#      max_tokens, since truncation also produces unparseable JSON.
 # =============================================================================
 
 
@@ -52,6 +64,7 @@
 
 import os
 import re
+import ast
 import json
 import anthropic
 
@@ -77,6 +90,10 @@ STATUS_ERROR   = "ERROR"
 # Validate status labels (overall call outcome)
 VALIDATE_OK    = "success"
 VALIDATE_ERROR = "error"
+
+# Keys used to recognise the validation report among any dicts found in the
+# response text. A candidate must contain at least one of these.
+REPORT_MARKER_KEYS = ("overall_status", "checks", "issues_found")
 
 
 # =============================================================================
@@ -115,8 +132,9 @@ def build_validation_prompt(decoded_step, original_step, generated_code):
         2. Trace the PySpark code against those records
         3. Return a structured JSON validation report
 
-    Combining these into one prompt reduces API calls and gives Claude
-    full context when evaluating the code.
+    Steps 1 and 2 are performed internally. Only the JSON report is
+    written out. A final reminder at the end of the prompt restates the
+    output contract because it is the last instruction Claude reads.
 
     Parameters:
         decoded_step   : result dictionary from Phase 3 decoder
@@ -184,24 +202,27 @@ Output Files : {', '.join(output_files) if output_files else '(none)'}
 
 === YOUR TASK ===
 
-Perform a three-step validation:
+Perform the validation in three steps. Steps A and B are INTERNAL REASONING
+ONLY. Do NOT write out the test table, the trace, set notation, checkmarks,
+or any other analysis text. Only Step C is written in your response.
 
-STEP A — GENERATE SYNTHETIC TEST DATA
-Create a table of 15 synthetic test records for this step.
+STEP A — GENERATE SYNTHETIC TEST DATA (internal, do not output)
+Think of 15 synthetic test records for this step.
 Design the records to include:
   - Records that should PASS any filter conditions (include in output)
   - Records that should FAIL each filter condition (exclude from output)
   - Edge cases: boundary values, zero amounts, empty strings
 Use realistic business values (wire transfer amounts, status codes, dates).
-Format as a pipe-separated table with column headers.
 
-STEP B — TRACE THE CODE
+STEP B — TRACE THE CODE (internal, do not output)
 Mentally execute the PySpark code against your synthetic records.
 Track which rows survive each filter, the sort order, and any aggregation.
 Note any discrepancies between what the code does and what the SYSIN specifies.
 
-STEP C — PRODUCE VALIDATION REPORT
+STEP C — PRODUCE VALIDATION REPORT (this is your entire response)
 Return ONLY a valid JSON object (no markdown, no explanation).
+Summarise the outcome of Steps A and B inside the JSON fields
+"synthetic_data_summary", "checks" and "issues_found".
 Use this structure:
 
 {{
@@ -244,6 +265,14 @@ Use this structure:
     "correction_hint": "If correction_needed is true: describe exactly what needs to change. Empty string if false."
 }}"""
 
+    # Appended as a plain string (not part of the f-string above) so that
+    # no brace escaping is needed. This is the last text Claude reads.
+    prompt += """
+
+FINAL REMINDER: Your response must contain ONLY the JSON object above.
+Start your response with { and end with }.
+No analysis text, no markdown, no checkmarks before or after the JSON."""
+
     return prompt
 
 
@@ -251,11 +280,69 @@ Use this structure:
 # SECTION 5 — RESPONSE PARSER
 # =============================================================================
 
+def _looks_like_report(candidate):
+    """
+    Returns True if a parsed object looks like the validation report
+    rather than an unrelated or nested dictionary.
+    """
+
+    if not isinstance(candidate, dict):
+        return False
+    return any(key in candidate for key in REPORT_MARKER_KEYS)
+
+
+def _balanced_slice(text, start):
+    """
+    Returns the substring of text beginning at text[start] == '{' and
+    ending at the matching '}', ignoring braces inside quoted strings.
+    Returns None if the braces never balance.
+    """
+
+    depth     = 0
+    in_string = False
+    quote     = ""
+    escaped   = False
+
+    for i in range(start, len(text)):
+        char = text[i]
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            continue
+
+        if char in ('"', "'"):
+            in_string = True
+            quote     = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
+    return None
+
+
 def parse_validation_response(response_text):
     """
     Parses Claude's validation response into a Python dictionary.
 
-    Handles cases where Claude wraps the JSON in markdown code fences.
+    Handles:
+        - JSON wrapped in markdown code fences
+        - Analysis text before or after the JSON (including text that
+          contains braces, such as set notation {R01-R12, R14, R15})
+        - Python-style dictionaries with single quotes
+
+    Strategy:
+        Every '{' in the text is tried as a start position. The first
+        candidate that parses and contains a report key (overall_status,
+        checks or issues_found) is returned. Candidates that fail to
+        parse, such as set literals, are skipped.
 
     Parameters:
         response_text : the raw text response from Claude
@@ -274,60 +361,42 @@ def parse_validation_response(response_text):
     cleaned = re.sub(r'^```\s*$',    '', cleaned, flags=re.MULTILINE)
     cleaned = cleaned.strip()
 
-    # Extract the JSON object
-    first_brace = cleaned.find('{')
-    last_brace  = cleaned.rfind('}')
-
-    if first_brace == -1 or last_brace == -1:
+    if cleaned.find('{') == -1:
         print("  [ERROR] No JSON found in validation response")
+        print(f"  [DEBUG] Response start: {cleaned[:300]}")
         return None
 
-    # Slice from the first { to the last } as a starting point
-    json_text = cleaned[first_brace : last_brace + 1]
+    decoder = json.JSONDecoder()
 
-    # First attempt — parse the full slice directly
-    try:
-        return json.loads(json_text)
-
-    except json.JSONDecodeError:
-        # Attempt 2 — Claude may have used single quotes (Python dict style)
-        # ast.literal_eval handles {'key': 'value'} syntax correctly
+    # Pass 1 — strict JSON, trying each '{' as a start position
+    position = cleaned.find('{')
+    while position != -1:
         try:
-            import ast
-            result = ast.literal_eval(json_text)
-            if isinstance(result, dict):
-                return result
-        except Exception:
-            pass
+            candidate, end = decoder.raw_decode(cleaned, position)
+            if _looks_like_report(candidate):
+                return candidate
+            # Valid JSON but not the report (nested or unrelated dict):
+            # continue scanning after it.
+            position = cleaned.find('{', end)
+        except json.JSONDecodeError:
+            position = cleaned.find('{', position + 1)
 
-        # Attempt 3 — "Extra data": Claude appended text after closing }.
-        # Walk character by character tracking brace depth to find exactly
-        # where the first complete top-level object ends.
-        depth = 0
-        for i, char in enumerate(json_text):
-            if char == '{':
-                depth += 1
-            elif char == '}':
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(json_text[:i + 1])
-                    except json.JSONDecodeError:
-                        try:
-                            import ast
-                            result = ast.literal_eval(json_text[:i + 1])
-                            if isinstance(result, dict):
-                                return result
-                        except Exception:
-                            pass
-                    print(f"  [ERROR] Could not parse validation JSON")
-                    # Print first 300 chars so the raw response is visible
-                    print(f"  [DEBUG] Response start: {json_text[:300]}")
-                    return None
+    # Pass 2 — Python dict syntax (single quotes), balanced-brace slices
+    position = cleaned.find('{')
+    while position != -1:
+        snippet = _balanced_slice(cleaned, position)
+        if snippet:
+            try:
+                candidate = ast.literal_eval(snippet)
+                if _looks_like_report(candidate):
+                    return candidate
+            except Exception:
+                pass
+        position = cleaned.find('{', position + 1)
 
-        print("  [ERROR] No complete JSON object found in validation response")
-        print(f"  [DEBUG] Response start: {json_text[:300]}")
-        return None
+    print("  [ERROR] Could not parse validation JSON")
+    print(f"  [DEBUG] Response start: {cleaned[:300]}")
+    return None
 
 
 # =============================================================================
@@ -454,6 +523,11 @@ def validate_generated_code(decoded_step, original_step,
             messages   = [{"role": "user", "content": prompt}]
         )
         response_text = message.content[0].text
+
+        # A response cut off at max_tokens leaves unbalanced JSON
+        if getattr(message, "stop_reason", None) == "max_tokens":
+            print(f"  [WARN] Response truncated at {MAX_TOKENS} tokens "
+                  f"for {step_name}; JSON may be incomplete")
 
     except Exception as error:
         print(f"  [ERROR] API call failed: {error}")
