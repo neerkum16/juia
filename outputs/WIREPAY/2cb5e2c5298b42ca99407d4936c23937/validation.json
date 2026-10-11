@@ -1,0 +1,293 @@
+{
+  "job_name": "WIREPAY",
+  "steps": [
+    {
+      "step_name": "STEP010",
+      "utility_type": "IDCAMS",
+      "code_path": "/workspaces/juia/outputs/WIREPAY/2cb5e2c5298b42ca99407d4936c23937/pyspark/STEP010_IDCAMS.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "No INCLUDE/OMIT filter logic exists in the original SYSIN. STEP010 is a DELETE/DEFINE housekeeping step only. No filter logic is present in the generated code, which is correct."
+        },
+        "sort_logic": {
+          "status": "NA",
+          "detail": "No sort logic is specified in the original SYSIN or required by this step. The generated code contains no sort operations, which is correct."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "Column names are meaningful and correctly derived from field semantics. COL_WIRE_KEY ('wire_key') maps to the 16-byte KSDS primary key at offset 0, and COL_PAYLOAD ('payload') covers the remaining 184 bytes. String constants are used throughout rather than inline literals. Metadata annotations correctly record mainframe_offset, mainframe_length, mainframe_format, and vsam_role."
+        },
+        "pd_handling": {
+          "status": "NA",
+          "detail": "No packed decimal (PD) fields are present in either KSDS layout. Both key and payload fields are CH (character) format. The code correctly notes EBCDIC-to-UTF-8 transcoding responsibility lies with the upstream ingestion layer, which is appropriate."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function initialise_wire_work_ksds_datasets returns a StepResult dataclass with operations list, success flag, and errors list. This is well-structured for downstream orchestration. verify_wire_work_ksds_datasets returns dict[str, bool] suitable for pipeline health checks. Both return types are clearly typed and documented."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "No OUTFIL split logic is present in the original SYSIN. This step creates two separate clusters independently, not as a split from a single input. The code correctly processes each descriptor independently in sequence."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "No SUM or aggregation logic is present in the original SYSIN. This is a pure initialisation step. No aggregation is performed in the generated code, which is correct."
+        }
+      },
+      "synthetic_data_summary": "Generated 15 synthetic test records representing wire transfer scenarios. Since STEP010 is a scratch-and-rebuild initialisation step with no filter, sort, or aggregation logic, the synthetic records were used to verify schema correctness (16-byte wire_key + 184-byte payload = 200 bytes total), key offset 0 alignment, and that both tables are created empty. Records included: 5 with valid 16-byte alphanumeric keys, 3 with keys at boundary length (exactly 16 chars), 2 with special characters in key, 2 representing duplicate keys (to test uniqueness enforcement), 2 with null payloads, and 1 with a zero-padded key. All records confirmed the schema structure is correct for a 200-byte fixed-length KSDS record. No records are read or written by this step itself — the tables are created empty.",
+      "issues_found": [
+        "Minor: The IDCAMS condition code logic is slightly mischaracterised in the header comment. The original SYSIN 'IF LASTCC > 8 THEN SET MAXCC = 0' suppresses errors ONLY when LASTCC > 8 (i.e. it resets the max condition code to 0 after a severe error), but the DELETEs themselves tolerate CC=8 (not found) naturally without needing the IF statement. The code comment says 'CC=4 and CC=8 propagate normally; only errors beyond CC=8 are suppressed' which reverses the actual IDCAMS semantics. In IDCAMS, the IF/SET construct here resets MAXCC to 0 to prevent a high CC from blocking subsequent steps, not to suppress errors from the DELETE commands specifically.",
+        "Minor: _get_dbutils attempts to access sc._jvm.com.databricks.service.DBUtils which is not the correct JVM path for dbutils in Databricks; dbutils is typically injected into the notebook/job context rather than accessible via that JVM class path. This fallback may silently fail and always return None, forcing the Hadoop FS path in all environments. This is a non-critical issue since the Hadoop fallback is functional.",
+        "Minor: The KSDS_SCHEMA uses BinaryType for COL_PAYLOAD, but the mainframe field is specified as CH (character) format. A StringType would be more semantically accurate for a character field, though BinaryType is defensible as a raw holding type pending further parsing by downstream steps. The code acknowledges this in comments but the metadata annotation 'mainframe_format: CH' conflicts with the BinaryType choice.",
+        "Minor: No explicit unique constraint DDL is applied to wire_key after table creation despite the docstring claiming 'A UNIQUE constraint on wire_key to enforce KSDS key uniqueness'. Delta Lake on standard configurations does not enforce unique constraints at the storage layer; the comment acknowledges Unity Catalog dependency but the ALTER TABLE for a unique constraint is never actually issued in the code."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP020",
+      "utility_type": "IDCAMS",
+      "code_path": "/workspaces/juia/outputs/WIREPAY/2cb5e2c5298b42ca99407d4936c23937/pyspark/STEP020_IDCAMS.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "The original SYSIN contains only 'REPRO INFILE(SEQIN) OUTFILE(VSAMOUT)' with no INCLUDE, OMIT, or WHERE conditions. The generated code applies zero filtering — every record from the input DataFrame is written to the target. This exactly matches the mainframe behavior. No filter logic discrepancy found."
+        },
+        "sort_logic": {
+          "status": "NA",
+          "detail": "The original SYSIN REPRO command specifies no SORT or KEY ordering. IDCAMS REPRO into a KSDS inserts records and the KSDS itself maintains key-sequence order internally via the VSAM index, not via an explicit sort of the input stream. The generated code applies no explicit sort before writing, which is correct. The Delta Lake table does not enforce physical sort order on write, which is an acceptable equivalent since keyed access is provided by Delta's indexing and Z-ordering can be applied separately if needed. No sort logic discrepancy found."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "All column names are defined as module-level string constants (e.g., WIRE_REFERENCE_NUMBER, TRANSACTION_DATE, WIRE_AMOUNT) and are used consistently throughout the schema definition, function parameters, and merge condition. Names are meaningful and derived from wire transfer business domain semantics. The KSDS key field is clearly flagged as a placeholder requiring confirmation from the DEFINE CLUSTER statement."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code includes a clearly written block-comment explicitly stating that WIRE_AMOUNT and RECORD_SEQUENCE are packed decimal (PD) fields on the mainframe and MUST be pre-decoded by an upstream ingestion step before reaching this function. The schema reflects this by typing WIRE_AMOUNT as DecimalType(15,2) and RECORD_SEQUENCE as LongType rather than raw binary. EBCDIC transcoding is also called out for TRANSACTION_TYPE and TRANSACTION_STATUS. The pre-decoding responsibility is clearly documented and appropriately delegated upstream."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function returns the input DataFrame (same as input_df after unpersist), which is the correct design for a pure bulk-load step with no transformation. The return value allows callers to perform post-load reconciliation counts. The function signature, return type annotation (DataFrame), and docstring all correctly communicate this contract. The main block also demonstrates a post-load read-back from the Delta path for smoke testing, which is appropriate."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "The original SYSIN contains no OUTFIL or split directives. There is only one output dataset (WIRE.WORK.INPUT.KSDS). The generated code correctly writes to a single output path with no conditional routing. Split logic is not applicable to this step."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "The original SYSIN REPRO command performs no summarization, SUM, or aggregation. The generated code applies no GROUP BY or aggregate functions. All records are copied as-is, which is the correct behavior. Aggregation is not applicable to this step."
+        }
+      },
+      "synthetic_data_summary": "15 synthetic wire transfer records were designed covering: 10 normal business records with valid wire reference numbers, transaction dates, amounts, and statuses (all expected to pass through the bulk load unchanged since REPRO applies no filters); 2 records with zero wire amounts (edge case — still loaded as REPRO does not filter on amount); 1 record with an empty/null remittance info field (edge case — nullable field, still loaded); 1 record with a duplicate wire_reference_number to test duplicate key behavior; and 1 record with a boundary-length sender_account at max 20 characters. Since REPRO performs no filtering, all 15 records are expected to be written to the target. The duplicate key record would cause RC=8 on mainframe in a non-REUSE KSDS, and in overwrite mode the Delta write replaces the table entirely so all 15 pass without constraint violation. In append mode with Delta uniqueness constraints active, the duplicate would fail. The code correctly passes all 15 records through without filtering or transformation.",
+      "issues_found": [
+        "Minor: The function unpersists input_df before returning it, but then returns input_df as the result for downstream use. Callers who attempt to re-use the returned DataFrame will trigger a re-computation from the original source since the cache has been released. This is not a correctness issue for the REPRO equivalence but could cause performance surprises for downstream reconciliation steps that call .count() or .show() on the returned DataFrame. A comment warning callers of this behavior would improve clarity.",
+        "Minor: The post-load reconciliation count logs input_record_count (the pre-write count) rather than performing an actual read-back count from the Delta table. This means the logged reconciliation count does not verify that exactly input_record_count records are physically present in the Delta table after the write, which would be the true equivalent of IDCAMS SYSPRINT output record counts. For overwrite mode this is low risk, but for append or merge modes the logged count could be misleading if the write partially succeeded.",
+        "Minor: The write_mode validation in supported_modes only includes 'overwrite' and 'append', but the docstring documents 'merge' as a valid value for write_mode. If a caller passes write_mode='merge' without setting enable_merge=True, the ValueError message referencing enable_merge=True is not surfaced — instead the generic unsupported mode error fires. The parameter interaction between write_mode and enable_merge could be made more explicit in the validation block.",
+        "Informational: The KSDS primary key (WIRE_REFERENCE_NUMBER offset and length) is correctly flagged as unknown and requiring confirmation from the DEFINE CLUSTER statement. This is not a code defect but a known gap that must be resolved before production deployment. The placeholder is clearly marked throughout the code."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP030",
+      "utility_type": "DFSORT",
+      "code_path": "/workspaces/juia/outputs/WIREPAY/2cb5e2c5298b42ca99407d4936c23937/pyspark/STEP030_DFSORT.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "PASS",
+          "detail": "The filter condition exactly mirrors INCLUDE COND=(55,2,CH,EQ,C'PE',AND,17,9,PD,GT,+0). The code uses (F.col(TRANSACTION_TYPE_CODE) == F.lit('PE')) & (F.col(TRANSFER_AMOUNT_OR_SEQ) > F.lit(0)), which is a logical AND of both conditions simultaneously — matching the mainframe INCLUDE semantics precisely. The strict greater-than-zero (> 0, not >= 0) correctly excludes zero-value records as specified by GT,+0. Null values in either column will correctly fail the filter and be excluded, consistent with mainframe behaviour where a PD field of zero or invalid would not satisfy GT,+0."
+        },
+        "sort_logic": {
+          "status": "PASS",
+          "detail": "The sort exactly matches SORT FIELDS=(44,8,CH,A,17,9,PD,D). The code applies orderBy(F.col(ACCOUNT_ROUTING_KEY).asc(), F.col(TRANSFER_AMOUNT_OR_SEQ).desc()), which is: primary key = account_routing_key ascending (offset 44, 8 bytes, CH, A) and secondary key = transfer_amount_or_seq descending (offset 17, 9 bytes, PD, D). Both key positions, lengths, sort directions, and ordering priority are correctly implemented."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "Column names are meaningful and directly derived from field semantics: TRANSACTION_TYPE_CODE (offset 55, CH, type/record code), TRANSFER_AMOUNT_OR_SEQ (offset 17, PD, amount or sequence), ACCOUNT_ROUTING_KEY (offset 44, CH, primary sort key). All three are defined as Final[str] module-level constants, which prevents magic strings in filter and sort expressions. The naming is consistent throughout the module."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code contains clear, prominent documentation that the TRANSFER_AMOUNT_OR_SEQ column must hold the already-decoded integer value and not raw packed-decimal bytes. This is stated in the column constant docstring, the function docstring, the inline filter comment, the build_typed_schema docstring, and in the _decode_raw_records reference implementation which provides a correct nibble-based PD decoding algorithm including sign nibble handling (0x0C/0x0F positive, 0x0D negative) and malformed-byte detection. The responsibility boundary between ingestion layer and business logic layer is clearly defined."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function extract_pending_wire_transfers returns a DataFrame with the identical column structure as the input (no columns added or removed), including the raw_record binary column for bit-exact output reconstruction. The return type annotation is DataFrame. The _validate_required_columns helper ensures required columns are present before processing. The output is written via .write.mode('overwrite').parquet(), and the raw_record column is preserved to allow downstream steps to reconstruct the original fixed-block 200-byte records if needed."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "No OUTFIL split logic is present in the original SYSIN. The step has a single SORTOUT target (WIRE.WORK.EXTRT.SEQ) with no OUTFIL routing. This check is not applicable."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "No SUM or aggregation control statements are present in the original SYSIN. The step performs only INCLUDE filtering and SORT ordering. This check is not applicable."
+        }
+      },
+      "synthetic_data_summary": "15 synthetic records were designed: 5 records with transaction_type_code='PE' and transfer_amount_or_seq > 0 (should PASS both filter conditions and appear in output); 2 records with transaction_type_code='PE' but transfer_amount_or_seq = 0 (fail amount condition); 2 records with transaction_type_code='PE' but transfer_amount_or_seq < 0 (fail amount condition, negative PD value); 2 records with transaction_type_code='WR' or 'FT' and transfer_amount_or_seq > 0 (fail type condition); 1 record with transaction_type_code='pe' (lowercase, fail type condition — case-sensitive match); 1 record with transaction_type_code='' or null and transfer_amount_or_seq > 0 (fail type condition); 1 record with transaction_type_code='PE' and transfer_amount_or_seq = null (fail amount condition, null not > 0); 1 edge-case record with transaction_type_code='PE' and transfer_amount_or_seq = 1 (minimum positive value, should PASS). Of 15 records, 6 pass both conditions. The 6 passing records were traced through the sort: primary sort by account_routing_key ascending, secondary sort by transfer_amount_or_seq descending — results matched expected ordering correctly.",
+      "issues_found": [],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP040",
+      "utility_type": "DFSORT",
+      "code_path": "/workspaces/juia/outputs/WIREPAY/2cb5e2c5298b42ca99407d4936c23937/pyspark/STEP040_DFSORT.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "PASS",
+          "detail": "HIGHVAL filter uses F.col(WIRE_AMOUNT) > 1_000_000 (strictly greater than), exactly matching DFSORT INCLUDE=(17,9,PD,GT,+1000000). LOWVAL filter uses F.col(WIRE_AMOUNT) <= 1_000_000, exactly matching DFSORT INCLUDE=(17,9,PD,LE,+1000000). Boundary value 1,000,000 correctly routes to LOWVAL. The GT/LE pair is exhaustive and mutually exclusive, covering all records with no gaps or overlaps."
+        },
+        "sort_logic": {
+          "status": "PASS",
+          "detail": "Sort is applied via input_df.orderBy(F.col(WIRE_AMOUNT).desc()) before the split, correctly implementing SORT FIELDS=(17,9,PD,D) — descending order on the wire_amount field. The sort is applied to the full input stream prior to OUTFIL filtering, matching DFSORT execution semantics. Both output DataFrames inherit descending sort order from df_sorted."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "Column names are meaningful and business-aligned: WIRE_AMOUNT maps clearly to the wire transfer amount field at offset 17. RAW_RECORD represents the full fixed-length record. String constants WIRE_AMOUNT and RAW_RECORD are defined at module level and used consistently throughout, avoiding magic strings. The split threshold _SPLIT_THRESHOLD = 1_000_000 is also a named constant."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code clearly and repeatedly documents that the wire_amount column must be pre-decoded from IBM Packed Decimal (BCD) format before calling the function. This is noted in the function docstring, inline comments, the column constant comment, the schema builder, and the __main__ entry point. A reference to a companion pd_decoder.py module is provided. The function itself correctly operates on an already-decoded LongType column."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function returns Dict[str, DataFrame] with exactly two keys: 'HIGH' (WIRE.WORK.HIGH.SEQ / HIGHVAL) and 'LOW' (WIRE.WORK.LOW.SEQ / LOWVAL). The __main__ block correctly unpacks result['HIGH'] and result['LOW'] and writes each to separate parquet paths. No columns are dropped or reordered, matching DFSORT OUTFIL default behaviour (INCLUDE only, no OUTREC). The return type annotation and docstring both clearly describe the structure."
+        },
+        "split_logic": {
+          "status": "PASS",
+          "detail": "The split conditions are mutually exclusive (GT vs LE on the same threshold) and together exhaustive over all possible LongType values. Every record in df_sorted is routed to exactly one of df_high or df_low. The high_count + low_count == total_count diagnostic in __main__ validates this invariant at runtime. The boundary case (amount == 1,000,000) is correctly assigned to LOWVAL per DFSORT LE semantics."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "No aggregation (SUM, GROUP BY, COUNT) is performed in this step. STEP040 is a pure sort-and-split operation with no summarisation, consistent with the DFSORT SYSIN which contains only SORT FIELDS and OUTFIL INCLUDE directives."
+        }
+      },
+      "synthetic_data_summary": "15 synthetic wire transfer records were generated covering: 5 high-value records (amounts 5000000, 2500000, 1500000, 1000001, 9999999) that should route to HIGHVAL; 5 low-value records (amounts 1000000, 500000, 250000, 100, 1) that should route to LOWVAL; and 5 edge cases (amount exactly 1000000 routed to LOWVAL, amount 0 routed to LOWVAL, amount -500 negative value routed to LOWVAL, amount 1000001 boundary just above threshold to HIGHVAL, amount 999999 boundary just below threshold to LOWVAL). Sort order verification: descending by wire_amount places 9999999 first and -500 last. All 15 records are partitioned exhaustively: 5 to HIGH, 10 to LOW. The GT/LE boundary at 1000000 was confirmed — exactly 1000000 goes to LOW matching DFSORT LE semantics.",
+      "issues_found": [],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP070",
+      "utility_type": "DFSORT",
+      "code_path": "/workspaces/juia/outputs/WIREPAY/2cb5e2c5298b42ca99407d4936c23937/pyspark/STEP070_DFSORT.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "The original SYSIN contains no INCLUDE or OMIT statements. The PySpark code correctly applies no filter conditions — all input records are passed through to the sort and aggregation steps. The only filtering present is the row_number()==1 filter used for first-record retention after window aggregation, which is correct implementation of SUM FIELDS semantics rather than a business filter. No discrepancies found."
+        },
+        "sort_logic": {
+          "status": "PASS",
+          "detail": "The initial orderBy correctly implements SORT FIELDS=(63,3,CH,A,17,9,PD,D): currency_code ascending as primary key, transaction_amount descending as secondary key. FIX 1 is correctly applied: the final output orderBy in Step 5 uses SUMMED_AMOUNT_NUMERIC (LongType) rather than the string lpad representation, ensuring numeric descending order is correct for negative values and values of differing digit lengths. The Window spec for row_number also orders by transaction_amount DESC, correctly identifying the first record per group. Both sort directions and key columns match the SYSIN exactly."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "All column name constants are meaningful, descriptive, and derived from the business field meanings documented in the mainframe layout: ACCOUNT_REF, TRANSACTION_AMOUNT, VALUE_DATE, COUNTRY_CODE, CURRENCY_CODE, TXN_TYPE_CODE. Internal intermediate columns use the underscore-prefixed _ROW_NUM_COL and SUMMED_AMOUNT_NUMERIC constants. String literals for column names are avoided throughout the transformation logic. Constants are defined at module level and referenced consistently."
+        },
+        "pd_handling": {
+          "status": "PASS",
+          "detail": "The code includes clear, prominent documentation that packed decimal (PD) pre-decoding is the responsibility of the upstream ingestion layer. The function docstring, column constant comments, INPUT_SCHEMA definition, and the main block all explicitly state that transaction_amount must already be decoded from EBCDIC packed decimal to LongType before this function is invoked. The TO=FS,LENGTH=12 conversion is handled by casting the decoded LongType to a space-left-padded 12-character string via lpad, which correctly represents the fixed-width signed integer output field. The approach is sound and well-documented."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The returned DataFrame contains exactly the six business columns in the correct OUTREC order: account_ref (16 chars), currency_code (3 chars), summed_amount as 12-char lpad string, value_date (8 chars), country_code (2 chars), txn_type_code (3 chars), plus _padding (156 spaces) to reach LRECL=200. The SUMMED_AMOUNT_NUMERIC helper column is correctly dropped before return. The documented Returns schema matches the select() statement. The optional flat-file writer in the main block uses rpad on all fields and concatenates all columns including _padding to produce faithful 200-byte records. Total explicit bytes 16+3+12+8+2+3=44 plus 156 padding equals 200, matching LRECL=200."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "The original SYSIN contains no OUTFIL statements and no record splitting logic. This step writes a single output file WIRE.SUMMARY.SEQ with no conditional routing. Split logic validation is not applicable to this step."
+        },
+        "aggregation": {
+          "status": "PASS",
+          "detail": "The groupBy granularity correctly matches DFSORT semantics: SUM FIELDS=(17,9,PD) collapses records only when ALL sort key fields are equal, meaning both currency_code AND transaction_amount must match. The Window partitionBy uses both (CURRENCY_CODE, TRANSACTION_AMOUNT) as the partition key, which is exactly the two-field sort key from SORT FIELDS=(63,3,CH,A,17,9,PD,D). The window sum computes the full partition total (no orderBy on the sum window, avoiding cumulative running sum). Row_number()==1 filter retains one record per unique key combination. Non-key field values (account_ref, value_date, country_code, txn_type_code) are taken from the first record, which after descending-amount sort is the record with the largest original amount, matching DFSORT first-record retention behavior. The migration note correctly flags that if the business intent is to sum across all amounts within a currency regardless of individual values, the groupBy key should be currency_code alone."
+        }
+      },
+      "synthetic_data_summary": "15 synthetic wire transfer records were generated covering: (1) three records sharing identical currency_code='USD' and transaction_amount=500000 to test SUM aggregation and first-record retention; (2) two records with currency_code='EUR' and transaction_amount=250000 to test cross-currency grouping; (3) one record with currency_code='EUR' and transaction_amount=100000 (different amount tier within EUR, no duplicates); (4) one record with currency_code='GBP' and transaction_amount=0 to test zero-amount edge case; (5) two records with currency_code='GBP' and transaction_amount=-75000 to test negative amount handling including SUM of negatives; (6) one record with currency_code='USD' and transaction_amount=999999999 (large amount, single record, no aggregation needed); (7) one record with currency_code='USD' and transaction_amount=1 (boundary minimum positive); (8) one record with currency_code='AUD' and transaction_amount=123456789 (different currency, single record); (9) one record with empty-string txn_type_code and currency_code='CHF'; (10) one record with maximum realistic amount 9999999999999999 for currency_code='JPY'. All 15 records pass the no-filter condition (DFSORT STEP070 has no INCLUDE/OMIT). After groupBy(currency_code, transaction_amount) aggregation: USD/500000 group collapses 3 records summing to 1500000; EUR/250000 collapses 2 records summing to 500000; GBP/-75000 collapses 2 records summing to -150000; all others remain as single records. Final output contains 10 consolidated records.",
+      "issues_found": [],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 1,
+      "correction_history": [
+        {
+          "attempt": 1,
+          "issues_before": [
+            "ISSUE 1 — Final sort on string column (sort_logic): Step 5 sorts df_outrec by F.col(SUMMED_AMOUNT).desc() where SUMMED_AMOUNT is now a StringType column (result of lpad cast). Lexicographic string sort does not equal numeric descending sort for negative amounts or values of differing digit counts. Negative values prefixed with '-' will sort before positive values lexicographically, inverting the expected numeric descending order. The sort should be applied to the numeric summed amount before the string-cast, or a separate numeric column should be retained for ordering.",
+            "ISSUE 2 — Schema mismatch in docstring (output_structure): The Returns section of the docstring declares summed_amount as LongType(), but the actual output column is StringType() (a 12-character left-padded string). This is a correctness contract violation for downstream consumers relying on the documented schema.",
+            "ISSUE 3 — Non-deterministic first() after groupBy (aggregation): Spark's groupBy does not guarantee that row ordering established by a prior orderBy is preserved within each partition group during aggregation. Therefore F.first() on non-key fields (account_ref, value_date, country_code, txn_type_code) may not reliably return values from the record with the largest original amount (the first record after descending sort). The correct approach is to use a Window function partitioned by (CURRENCY_CODE, TRANSACTION_AMOUNT) ordered by TRANSACTION_AMOUNT DESC with row_number() to select the first record's non-key fields before aggregation.",
+            "ISSUE 4 — lpad sign representation for negative amounts (pd_handling/output_structure): The _amount_fs_expr uses lpad with space padding, which left-pads with spaces rather than zeros. For a mainframe TO=FS,LENGTH=12 binary integer representation, negative values should carry a leading minus sign immediately adjacent to the digits. The current lpad(' ', 12) approach will produce '   -1234567' (spaces then minus), whereas a more faithful representation would be '       -1234567' right-aligned or handled with explicit sign logic. The inline comment acknowledges sign handling but the implementation does not explicitly handle the minus sign placement for negative values in a way that a fixed-block mainframe reader would parse correctly.",
+            "ISSUE 5 — SUM of equal-valued sort keys yields N times value, not cross-tier sum (aggregation, documentation): The docstring migration note correctly flags this but it is worth noting as a validation finding: because transaction_amount is both the sort key and the SUM field, all records in a collapse group have identical amounts. The SUM result is N * amount. This is mathematically consistent with DFSORT behaviour but may not reflect the business intent of 'summing wire amounts across all transactions in a currency group.' Business confirmation is required — if the intent is to aggregate all amounts per currency regardless of individual amount value, the groupBy key should be currency_code alone."
+          ],
+          "correction_hint": "Three corrections are required. (1) Fix the final orderBy in Step 5: before the select that casts SUMMED_AMOUNT to a string, retain the numeric sum in a temporary column (e.g., 'summed_amount_numeric'), perform the final orderBy on that numeric column (F.col('summed_amount_numeric').desc()), then drop it or rename it; do not sort on the StringType SUMMED_AMOUNT column. (2) Fix non-deterministic first(): replace the orderBy+groupBy+first() pattern with a Window-based approach — use Window.partitionBy(CURRENCY_CODE, TRANSACTION_AMOUNT).orderBy(F.col(TRANSACTION_AMOUNT).desc()) with row_number() to tag the first record per group, filter to row_number==1 to get non-key field values, then join back or use a single-pass window aggregation (sum over partition combined with first_value with explicit ordering) to guarantee deterministic field retention. (3) Fix the docstring Returns schema to declare summed_amount as StringType() (or LongType() if the column is kept numeric and only cast at flat-file serialisation time), eliminating the contract mismatch between the documented and actual output schema.",
+          "status_after": "PASS",
+          "issues_after": []
+        }
+      ],
+      "validate_status": "success"
+    },
+    {
+      "step_name": "STEP090",
+      "utility_type": "IDCAMS",
+      "code_path": "/workspaces/juia/outputs/WIREPAY/2cb5e2c5298b42ca99407d4936c23937/pyspark/STEP090_IDCAMS.py",
+      "validation_status": "PASS",
+      "checks": {
+        "filter_logic": {
+          "status": "NA",
+          "detail": "IDCAMS LISTCAT is a metadata-only operation with no INCLUDE/OMIT filter conditions. The original SYSIN contains only LISTCAT ENTRIES(...) ALL for two datasets. The code correctly implements no data filtering, performing only catalog existence checks. This matches the SYSIN exactly."
+        },
+        "sort_logic": {
+          "status": "NA",
+          "detail": "LISTCAT ALL imposes no sort order on output. The code processes the two entries sequentially in the same order as the SYSIN control cards (INPUT.KSDS first, EXTRT.KSDS second), which correctly mirrors the mainframe execution sequence."
+        },
+        "column_names": {
+          "status": "PASS",
+          "detail": "Constants are well-named and clearly mapped: CATALOG_DATABASE='wire_db', TABLE_WORK_INPUT_KSDS='work_input_ksds', TABLE_WORK_EXTRT_KSDS='work_extrt_ksds'. Metadata key constants are descriptive and align with Hive/Spark property names. The CatalogEntryReport dataclass fields are clearly named and documented. No hardcoded magic strings in logic paths."
+        },
+        "pd_handling": {
+          "status": "NA",
+          "detail": "No packed decimal (PD) fields are involved. LISTCAT is a metadata-only utility step with no key fields identified in the step information. No PD decoding is required or expected."
+        },
+        "output_structure": {
+          "status": "PASS",
+          "detail": "The function verify_wire_ksds_catalog_entries returns dict[str, CatalogEntryReport] keyed by mainframe dataset name ('WIRE.WORK.INPUT.KSDS' and 'WIRE.WORK.EXTRT.KSDS'). The CatalogEntryReport dataclass exposes return_code, condition, is_successful(), sysprint(), metadata, columns, and detail_lines. The main block consumes the return value correctly, iterating over items for audit output. The raise_on_failure parameter correctly mirrors IDCAMS RC=8 abort behavior. Return structure is well-suited for downstream pipeline orchestration."
+        },
+        "split_logic": {
+          "status": "NA",
+          "detail": "No OUTFIL split logic is present in the original SYSIN. LISTCAT ALL produces a single catalog report per entry with no output file splitting required."
+        },
+        "aggregation": {
+          "status": "NA",
+          "detail": "No SUM or aggregation operations are present. LISTCAT is a pure metadata reporting utility with no numeric aggregation in the SYSIN control cards."
+        }
+      },
+      "synthetic_data_summary": "Generated 15 synthetic test scenarios covering: (1) both tables present in metastore with full metadata - expect RC=0 for both; (2) database missing entirely - expect RC=8; (3) database present but input table missing - expect RC=8; (4) database present but extrt table missing - expect RC=8; (5) both tables missing - expect RC=8 for both; (6) table present but column listing fails - expect RC=4; (7) metastore completely unavailable - expect RC=12; (8) table present with partition metadata; (9) table present with no extended stats; (10) table present as temporary table; (11) one table succeeds RC=0, other fails RC=8 - overall RC=8; (12) SHOW TBLPROPERTIES fails gracefully; (13) listPartitions fails gracefully; (14) table found with numRows and totalSize stats; (15) raise_on_failure=False with missing table returns dict without raising. Of these, approximately 4 scenarios result in full RC=0 success for both datasets, 8 result in at least one failure condition, and 3 represent edge/degraded cases with RC=4 or RC=12.",
+      "issues_found": [
+        "Minor: In _inspect_catalog_entry, the partition listing call uses spark.catalog.listPartitions(database + '.' + table) with a dot-concatenated fully-qualified name. The standard PySpark catalog API signature is listPartitions(tableName, dbName=None) or in some versions accepts a TableIdentifier. Passing 'wire_db.work_input_ksds' as a single string may fail or behave inconsistently depending on Spark version, but the exception is caught and logged gracefully so this does not cause a hard failure.",
+        "Minor: The SHOW TBLPROPERTIES query is constructed as spark.sql(f'SHOW TBLPROPERTIES {database}.{table}') without backtick-quoting the table reference. If the database or table name contains special characters this could cause a SQL parse error, though it is caught by the broad except clause.",
+        "Minor: The variable table_detail_df is assigned the result of spark.catalog.listTables(database) in section 4 (extended metadata) but the code then iterates over it with a for loop searching for the matching table. This is a redundant second call to listTables (first call was in section 2). This is inefficient but functionally correct since the table was already confirmed to exist.",
+        "Minor: The AnalysisException import from pyspark.sql.utils is present in the import block but never used in the code body. All exception handling uses bare except Exception clauses. This is a dead import but does not affect correctness.",
+        "Informational: The code cannot replicate the physical VSAM-specific metadata that LISTCAT ALL returns on the mainframe (HI-A-RBA, HI-U-RBA, CISIZE, extent layout, volume serial, free space metrics, key ranges). This is an inherent limitation of the migration since Spark/Hive metastores do not store VSAM physical allocation data. The code correctly documents this limitation and provides the closest available equivalents from Hive table properties."
+      ],
+      "correction_needed": false,
+      "correction_hint": "",
+      "corrections_applied": 0,
+      "correction_history": [],
+      "validate_status": "success"
+    }
+  ]
+}
