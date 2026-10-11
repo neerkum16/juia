@@ -12,7 +12,7 @@ from agent.memory.session_store import get_run
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "sample_jcl/wire_payment_batch.jcl"
-DECODED = json.loads((ROOT / "outputs/wire_payment_batch_decoded.json").read_text(encoding="utf-8"))["steps"]
+DECODED = json.loads((ROOT / "tests/fixtures/wire_payment_batch_decoded.json").read_text(encoding="utf-8"))["steps"]
 
 
 class FakeDecoderSession:
@@ -74,6 +74,10 @@ class OrchestratorTests(unittest.TestCase):
             stored = get_run(result["run_id"], Path(temp) / "outputs/sessions.db")
             self.assertEqual(stored["status"], "success")
             self.assertEqual(stored["artifacts"], result["artifacts"])
+            self.assertEqual(
+                json.loads(Path(result["artifacts"]["result"]).read_text(encoding="utf-8")),
+                result,
+            )
 
             second = run_job(
                 SAMPLE, ROOT / "cntl", Path(temp) / "outputs",
@@ -136,6 +140,7 @@ class OrchestratorTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "failed")
             self.assertTrue(result["errors"])
+            self.assertTrue(Path(result["artifacts"]["result"]).is_file())
             self.assertEqual(
                 get_run(result["run_id"], Path(temp) / "sessions.db")["status"],
                 "failed",
@@ -193,6 +198,43 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(len(result["validation_results"]), 6)
             self.assertEqual(len(result["errors"]), 6)
+
+    def test_exhausted_validation_review_keeps_run_successful(self):
+        with tempfile.TemporaryDirectory() as temp:
+            def generate(decoded, original, client, output_folder):
+                path = Path(output_folder) / f'{decoded["step_name"]}_{decoded["utility_type"]}.py'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# generated\n", encoding="utf-8")
+                return str(path), "success"
+
+            def validate(decoded, original, path, client):
+                if decoded["step_name"] == "STEP070":
+                    return {
+                        "step_name": "STEP070", "validation_status": "REVIEW",
+                        "last_validation_status": "FAIL", "review_required": True,
+                        "corrections_applied": 3, "issues_found": ["Needs review"],
+                    }
+                return {"step_name": decoded["step_name"], "validation_status": "PASS"}
+
+            result = run_job(
+                SAMPLE, ROOT / "cntl", temp,
+                decoder_factory=FakeDecoderSession,
+                generator=generate,
+                validator=validate,
+            )
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["review_steps"], ["STEP070"])
+            self.assertTrue(result["review_required"])
+            self.assertEqual(result["errors"], [])
+            self.assertTrue(any("STEP070" in item for item in result["warnings"]))
+            self.assertEqual(result["step_statuses"][6]["validation_status"], "REVIEW")
+            spec = Path(result["artifacts"]["spec"]).read_text(encoding="utf-8")
+            self.assertIn("5/6 PASS, 1 REVIEW", spec)
+            self.assertIn("Human review required", spec)
+            self.assertEqual(
+                get_run(result["run_id"], Path(temp) / "sessions.db")["review_steps"],
+                ["STEP070"],
+            )
 
     def test_unresolved_cntl_marks_run_incomplete(self):
         class MissingCntlDecoder(FakeDecoderSession):

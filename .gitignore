@@ -20,9 +20,9 @@ Thumbs.db
 # Validation status cache - marker
 outputs/pyspark/*.validated
 
-# Backups after self-correction
+# Legacy backups from the phase-specific validator
 outputs/pyspark/backups/
 
-# Per-run backend state and generated artifacts
-outputs/sessions.db
-outputs/*/*/
+# Legacy backups from runs made before correction backups were removed.
+# Run JSON, PySpark, diagrams, specs, and sessions.db are tracked.
+outputs/*/*/pyspark/backups/

@@ -27,7 +27,7 @@
 #                    → save corrected code
 #                    → re-validate
 #                    → repeat up to MAX_RETRIES times
-#                    → if still FAIL after MAX_RETRIES → return FAIL result
+#                    → if still FAIL after MAX_RETRIES → return REVIEW result
 #                      with full correction history
 #
 # CORRECTION HISTORY:
@@ -40,14 +40,14 @@
 # SECTION 1 — IMPORTS
 # =============================================================================
 
-import os
 import re
-import anthropic
 
 from agent.validator.code_validator import (
     validate_generated_code,
     read_generated_code,
     STATUS_PASS,
+    STATUS_FAIL,
+    STATUS_REVIEW,
     STATUS_ERROR,
     CLAUDE_MODEL,
     MAX_TOKENS
@@ -216,8 +216,8 @@ def save_corrected_code(code, code_path):
     """
     Overwrites the existing generated file with the corrected code.
 
-    Creates a backup of the original file before overwriting.
-    The backup is saved as {filename}.bak_{attempt_number}
+    Each job run has its own output directory. The caller records correction
+    history in its validation report, so source backups are not written.
 
     Parameters:
         code      : the corrected Python code string
@@ -227,30 +227,11 @@ def save_corrected_code(code, code_path):
         True on success, False on failure.
     """
 
-    # Count existing backups to number this one
-    backup_count = 0
-    while os.path.exists(f"{code_path}.bak_{backup_count + 1}"):
-        backup_count += 1
-    backup_folder = os.path.join(os.path.dirname(code_path), "backups")
-    os.makedirs(backup_folder, exist_ok=True)
-    filename      = os.path.basename(code_path)
-    backup_path   = os.path.join(backup_folder,
-                    f"{filename}.bak_{backup_count + 1}")
-
     try:
-        # Read the current content to save as backup
-        with open(code_path, encoding="utf-8") as f:
-            original_content = f.read()
-
-        # Save backup
-        with open(backup_path, "w", encoding="utf-8") as f:
-            f.write(original_content)
-
         # Write corrected code
         with open(code_path, "w", encoding="utf-8") as f:
             f.write(code)
 
-        print(f"  Backup saved: {backup_path}")
         print(f"  Corrected code saved: {code_path}")
         return True
 
@@ -279,8 +260,8 @@ def run_correction_loop(decoded_step, original_step,
            c. Re-validate
            d. Record what was attempted
            e. Repeat from step 2
-        4. If FAIL after MAX_RETRIES → return final FAIL result
-           with full correction history
+        4. If FAIL after MAX_RETRIES → return REVIEW with the final issues
+           and full correction history
 
     Parameters:
         decoded_step  : Phase 3 decoded result dict
@@ -402,12 +383,18 @@ def run_correction_loop(decoded_step, original_step,
             if remaining > 0:
                 print(f"  Still FAILING — {remaining} attempt(s) remaining")
             else:
-                print(f"  MAX_RETRIES reached — returning final FAIL result")
+                print(f"  MAX_RETRIES reached — marking for human REVIEW")
 
     # -------------------------------------------------------------------------
     # Add correction metadata to the final result
     # -------------------------------------------------------------------------
     validation_result["corrections_applied"] = corrections_applied
     validation_result["correction_history"]  = correction_history
+    if (validation_result.get("validation_status") == STATUS_FAIL
+            and validation_result.get("validate_status") != "error"
+            and corrections_applied == MAX_RETRIES):
+        validation_result["last_validation_status"] = STATUS_FAIL
+        validation_result["validation_status"] = STATUS_REVIEW
+        validation_result["review_required"] = True
 
     return validation_result

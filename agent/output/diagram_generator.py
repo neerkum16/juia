@@ -31,7 +31,7 @@
 #
 # OUTPUT:
 #   A string containing the full Mermaid diagram source.
-#   Saved as outputs/wire_payment_batch_lineage.mmd
+#   The caller writes it to lineage.mmd in the job's run folder.
 #   Also embedded inside the Markdown migration spec.
 #
 # CHANGE LOG (lineage completeness fix):

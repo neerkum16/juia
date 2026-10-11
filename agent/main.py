@@ -41,6 +41,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         "step_statuses": [],
         "errors": [],
         "warnings": [],
+        "review_steps": [],
+        "review_required": False,
         "validation_results": [],
         "artifacts": {},
         "code_paths": {},
@@ -48,6 +50,16 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     database_path = Path(output_folder) / "sessions.db"
 
     def finish():
+        run_folder = Path(output_folder) / result["job_name"] / run_id
+        result_path = run_folder / "result.json"
+        try:
+            run_folder.mkdir(parents=True, exist_ok=True)
+            result["artifacts"]["result"] = str(result_path)
+            write_json(result_path, result)
+        except Exception as error:
+            result["artifacts"].pop("result", None)
+            result["errors"].append(f"Could not write run result: {error}")
+            result["status"] = "failed"
         save_run(result, database_path)
         return result
 
@@ -87,6 +99,7 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     result["steps"] = decoded_steps
     validation_results = []
     code_paths = {}
+    incomplete = False
     for original, decoded in zip(original_steps, decoded_steps):
         name = original["step_name"]
         utility = original.get("utility_type", "UNKNOWN")
@@ -100,6 +113,7 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         }
         result["step_statuses"].append(step_status)
         if original.get("sysin_source") == "external_unresolved":
+            incomplete = True
             result["warnings"].append(
                 f"{name}: external SYSIN is unresolved ({original.get('sysin_dsn', '')})"
             )
@@ -112,6 +126,7 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
                 continue
             message = f"{name}: decode status {decode_status}: {decoded.get('notes', '')}"
             if decode_status == "skipped":
+                incomplete = True
                 result["warnings"].append(message)
             else:
                 result["errors"].append(message)
@@ -137,7 +152,13 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             }
         validation_results.append(validation)
         step_status["validation_status"] = validation.get("validation_status", "ERROR")
-        if step_status["validation_status"] != "PASS":
+        if step_status["validation_status"] == "REVIEW":
+            result["review_steps"].append(name)
+            result["review_required"] = True
+            result["warnings"].append(
+                f"{name}: human review required after correction retries"
+            )
+        elif step_status["validation_status"] != "PASS":
             result["errors"].append(
                 f"{name}: validation {step_status['validation_status']}"
             )
@@ -151,7 +172,7 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     result["code_paths"] = code_paths
     result["status"] = (
         "failed" if result["errors"] else
-        "incomplete" if result["warnings"] else "success"
+        "incomplete" if incomplete else "success"
     )
     try:
         diagram = generate_mermaid_diagram(job_name, steps_data)

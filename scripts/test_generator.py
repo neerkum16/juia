@@ -220,7 +220,8 @@ def main():
         file_path, gen_status = generate_pyspark_code(
             decoded_step  = decoded_step,
             original_step = original_step,
-            api_client    = api_client
+            api_client    = api_client,
+            output_folder = PYSPARK_OUTPUT
         )
 
         if gen_status == "success" and file_path:

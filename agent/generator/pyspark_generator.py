@@ -15,7 +15,7 @@
 #     - Inline comments referencing the original SYSIN control cards
 #     - An example main() block showing how to call the function
 #
-#   The generated files are saved to outputs/pyspark/ and are
+#   The generated files are saved to the caller-selected output folder and are
 #   immediately usable by a developer as a starting point for the
 #   modern migration.
 #
@@ -26,7 +26,7 @@
 #                    dd_statements)
 #
 # OUTPUT:
-#   outputs/pyspark/
+#   outputs/<job_name>/<run_id>/pyspark/ (when called by agent.main)
 #     STEP010_IDCAMS.py
 #     STEP020_IDCAMS.py
 #     STEP030_DFSORT.py
@@ -45,7 +45,7 @@
 #                                        Python code string
 #                                               │
 #                                               ▼
-#                                        outputs/pyspark/*.py
+#                                        caller-selected folder/*.py
 # =============================================================================
 
 
@@ -93,7 +93,6 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 16000
 
 # Where generated Python files are saved
-PYSPARK_OUTPUT_FOLDER = "outputs/pyspark"
 
 
 # =============================================================================
@@ -476,7 +475,7 @@ def save_generated_code(code, step_name, utility_type, output_folder):
 # =============================================================================
 
 def generate_pyspark_code(decoded_step, original_step, api_client,
-                          output_folder=PYSPARK_OUTPUT_FOLDER):
+                          output_folder):
     """
     Generates a complete PySpark Python file for one JCL step.
 
@@ -492,7 +491,7 @@ def generate_pyspark_code(decoded_step, original_step, api_client,
         original_step : step dictionary from Phase 2
                         (sysin_content, dd_statements)
         api_client    : Anthropic client object
-        output_folder : destination for this job's generated code
+        output_folder : required destination for this job's generated code
 
     Returns:
         A tuple of (file_path, status):

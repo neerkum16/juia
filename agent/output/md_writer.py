@@ -22,7 +22,7 @@
 #     - Migration notes aggregated from all steps
 #
 # OUTPUT:
-#   outputs/wire_payment_batch_migration_spec.md
+#   outputs/<job_name>/<run_id>/migration_spec.md (when called by agent.main)
 #
 # THE DOCUMENT RENDERS BEAUTIFULLY IN:
 #   GitHub repository view (including the Mermaid diagram)
@@ -73,7 +73,7 @@ def status_icon(status):
     Returns a Markdown-renderable icon for a validation status string.
 
     Parameters:
-        status : "PASS", "FAIL", "ERROR", "skipped", or anything else
+        status : "PASS", "REVIEW", "FAIL", "ERROR", "skipped", or anything else
 
     Returns:
         An emoji string.
@@ -84,7 +84,7 @@ def status_icon(status):
         return ICON_PASS
     elif status_upper == "FAIL":
         return ICON_FAIL
-    elif status_upper in ("ERROR", "ERRORS"):
+    elif status_upper in ("REVIEW", "ERROR", "ERRORS"):
         return ICON_WARN
     elif status_upper == "SKIPPED":
         return ICON_SKIP
@@ -177,6 +177,8 @@ def write_executive_summary(all_steps_data, validation_map):
     # Count validation results
     pass_count  = sum(1 for v in validation_map.values()
                       if v.get("validation_status") == "PASS")
+    review_count = sum(1 for v in validation_map.values()
+                       if v.get("validation_status") == "REVIEW")
     total_valid = len(validation_map)
 
     # Count utility types
@@ -192,6 +194,7 @@ def write_executive_summary(all_steps_data, validation_map):
 
     validation_summary = (
         f"{pass_count}/{total_valid} PASS"
+        + (f", {review_count} REVIEW" if review_count else "")
         if total_valid > 0 else "Not run"
     )
 
@@ -337,6 +340,9 @@ def write_decoded_step_section(step_data, validation_map, pyspark_folder):
     lines.append(f"")
     lines.append(f"**Status:** {val_icon} {val_status}")
     lines.append(f"")
+    if val_status == "REVIEW":
+        lines.append("**Human review required:** Automated correction attempts were exhausted.")
+        lines.append("")
 
     checks = validation.get("checks", {})
     if checks:

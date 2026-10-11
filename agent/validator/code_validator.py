@@ -34,7 +34,7 @@
 #   {
 #     "step_name"          : "STEP030",
 #     "utility_type"       : "DFSORT",
-#     "code_path"          : "outputs/pyspark/STEP030_DFSORT.py",
+#     "code_path"          : "outputs/WIREPAY/<run_id>/pyspark/STEP030_DFSORT.py",
 #     "validation_status"  : "PASS",
 #     "checks"             : { "filter_logic": {"status":"PASS","detail":"..."},
 #                               ... },
@@ -66,7 +66,6 @@ import os
 import re
 import ast
 import json
-import anthropic
 
 
 # =============================================================================
@@ -84,6 +83,7 @@ MAX_TOKENS    = 8000
 # Validation status labels
 STATUS_PASS    = "PASS"
 STATUS_FAIL    = "FAIL"
+STATUS_REVIEW  = "REVIEW"
 STATUS_NA      = "NA"
 STATUS_ERROR   = "ERROR"
 

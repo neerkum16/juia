@@ -27,7 +27,6 @@
 #
 # OUTPUT FILES:
 #   outputs/validation_report.json   — accumulated validation results per step
-#   outputs/pyspark/*.bak_N          — backup of any corrected files
 #   outputs/pyspark/*.validated      — marker written after a PASS
 # =============================================================================
 

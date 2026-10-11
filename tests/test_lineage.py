@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class LineageContractTests(unittest.TestCase):
     def test_sample_steps_and_dataset_edges(self):
         decoded, job_name = load_decoded_results(
-            str(ROOT / "outputs/wire_payment_batch_decoded.json")
+            str(ROOT / "tests/fixtures/wire_payment_batch_decoded.json")
         )
         original = load_original_steps(
             str(ROOT / "sample_jcl/wire_payment_batch.jcl"),

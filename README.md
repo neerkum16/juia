@@ -222,17 +222,26 @@ python -m agent.main sample_jcl/wire_payment_batch.jcl --cntl-folder cntl --outp
 
 Each invocation writes to `outputs/<job_name>/<run_id>/`, including generated
 PySpark files, decoded and validation JSON, a Mermaid diagram, and a migration
-specification. A SQLite index at `outputs/sessions.db` stores the structured
-result. To retrieve a completed or failed run:
+specification. Each run also has a `result.json`, including runs that fail
+before generation. The SQLite index at `outputs/sessions.db` stores the same
+structured result. Run folders and the SQLite index are not Git-ignored, so
+they can be committed together. To retrieve a completed or failed run:
 
 ```bash
 python -m agent.main --get-run RUN_ID --output-folder outputs
 ```
 
 The result status is `success`, `incomplete`, or `failed`. An unresolved
-external SYSIN marks the run incomplete; decode, generation, or validation
-errors mark it failed. Validation is a Claude review of generated code, not
-execution of that code in Spark.
+external SYSIN marks the run incomplete; setup, decode, generation, or
+validation errors mark it failed. A step still failing validation after all
+three correction attempts is marked `REVIEW` and listed in `review_steps`;
+the run is `success` if no other errors or incomplete steps remain. Such a
+script still requires human review before use. Each run owns its final scripts
+and validation report; the correction loop does not create source backups or
+`.validated` markers. Validation is a Claude review of generated code, not
+execution of that code in Spark. The older `scripts/test_*.py` phase drivers
+write to shared sample paths under `outputs/`; use `python -m agent.main` for
+new job runs.
 
 ---
 
@@ -299,35 +308,31 @@ and repository secret.
 
 ---
 
-## Sample Output (target)
+## Sample Run Output
 
-Given `wire_payment_batch.jcl`, JUIA produces:
+For `sample_jcl/wire_payment_batch.jcl`, the JOB name is `WIREPAY`. The
+orchestrator creates a fresh run folder each time:
 
-**`outputs/wire_payment_batch_migration_spec.md`**
+```text
+outputs/WIREPAY/<run_id>/
+├── result.json
+├── decoded.json
+├── validation.json
+├── lineage.mmd
+├── migration_spec.md
+└── pyspark/
+    ├── STEP010_IDCAMS.py
+    ├── STEP020_IDCAMS.py
+    ├── STEP030_DFSORT.py
+    ├── STEP040_DFSORT.py
+    ├── STEP070_DFSORT.py
+    └── STEP090_IDCAMS.py
 ```
-# Migration Spec — WIRE_PAYMENT_BATCH
 
-## Job Summary
-Steps: 8 | Utility steps: 7 | Program steps: 1
-Utilities: IDCAMS(2), DFSORT(3), IEBGENER(2)
-
-## Step 1 — LOADVSAM (IDCAMS)
-Business Rule: Load daily wire payment flat file into VSAM KSDS.
-               No REPLACE — duplicate keys will fail intentionally.
-Input:  PAYMENT.DAILY.INPUT.SEQ
-Output: PAYMENT.WORK.KSDS
-...
-```
-
-**`outputs/wire_payment_batch_lineage.mmd`**
-```
-graph LR
-  SEQIN[PAYMENT.DAILY.INPUT.SEQ] --> LOADVSAM
-  LOADVSAM --> WORKVSAM[PAYMENT.WORK.KSDS]
-  WORKVSAM --> EXTRACT
-  EXTRACT --> ACTIVE[PAYMENT.ACTIVE.SEQ]
-  ...
-```
+`outputs/sessions.db` indexes run results. The shared files in `outputs/`
+and `outputs/pyspark/` are from the older phase drivers. Automated tests use
+`tests/fixtures/wire_payment_batch_decoded.json`, so those shared files are
+not needed for the Phase 7 workflow or its test suite.
 
 ---
 
