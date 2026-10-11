@@ -20,8 +20,8 @@
 #   python scripts/test_generator.py
 #
 # INPUTS:
-#   sample_jcl/wire_payment_batch.jcl      (re-parsed for SYSIN content)
-#   outputs/wire_payment_batch_decoded.json (Phase 3 results)
+#   jcl/TEST.jcl      (re-parsed for SYSIN content)
+#   outputs/test_jcl_decoded.json (Phase 3 results)
 #   ANTHROPIC_API_KEY                       (Codespaces secret)
 #
 # OUTPUTS:
@@ -66,9 +66,9 @@ from agent.decoder.claude_decoder import get_api_client
 # SECTION 2 — CONFIGURATION
 # =============================================================================
 
-JCL_FILE_PATH     = "sample_jcl/wire_payment_batch.jcl"
+JCL_FILE_PATH     = "jcl/TEST.jcl"
 CNTL_FOLDER       = "cntl"
-DECODED_JSON_PATH = "outputs/wire_payment_batch_decoded.json"
+DECODED_JSON_PATH = "outputs/test_jcl_decoded.json"
 PYSPARK_OUTPUT    = "outputs/pyspark"
 
 

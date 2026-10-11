@@ -9,7 +9,7 @@ from agent.parser.utility_classifier import classify_steps
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE = ROOT / "sample_jcl/wire_payment_batch.jcl"
+SAMPLE = ROOT / "jcl/TEST.jcl"
 CNTL = ROOT / "cntl"
 
 

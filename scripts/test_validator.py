@@ -58,9 +58,9 @@ from agent.decoder.claude_decoder import get_api_client
 # SECTION 2 — CONFIGURATION
 # =============================================================================
 
-JCL_FILE_PATH      = "sample_jcl/wire_payment_batch.jcl"
+JCL_FILE_PATH      = "jcl/TEST.jcl"
 CNTL_FOLDER        = "cntl"
-DECODED_JSON_PATH  = "outputs/wire_payment_batch_decoded.json"
+DECODED_JSON_PATH  = "outputs/test_jcl_decoded.json"
 PYSPARK_FOLDER     = "outputs/pyspark"
 REPORT_OUTPUT_PATH = "outputs/validation_report.json"
 

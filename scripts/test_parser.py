@@ -50,7 +50,7 @@ from agent.parser.utility_classifier import (classify_steps,
 # SECTION 2 — CONFIGURATION
 # =============================================================================
 
-JCL_FILE_PATH  = "sample_jcl/wire_payment_batch.jcl"
+JCL_FILE_PATH  = "jcl/TEST.jcl"
 CNTL_FOLDER    = "cntl"
 SYSIN_DISPLAY_LIMIT = 2000
 

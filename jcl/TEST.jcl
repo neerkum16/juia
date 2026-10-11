@@ -1,4 +1,4 @@
-//WIREPAY  JOB (ACCT001),'WIRE PAYMENT BATCH',
+//MYTEST   JOB (ACCT001),'WIRE PAYMENT BATCH',
 //             CLASS=A,MSGCLASS=X,MSGLEVEL=(1,1),
 //             NOTIFY=&SYSUID
 //*
@@ -98,7 +98,8 @@
 //SORTIN   DD DSN=WIRE.DAILY.INPUT.SEQ,DISP=SHR
 //SORTOUT  DD DSN=WIRE.WORK.EXTRT.SEQ,
 //            DISP=(NEW,CATLG,DELETE),
-//            SPACE=(CYL,(10,5)),RECFM=FB,LRECL=200
+//            SPACE=(CYL,(10,5)),
+//            DCB=(RECFM=FB,LRECL=80,BLKSIZE=0,DSORG=PS)
 //SYSIN    DD DSN=SYS2.CNTL(WIREEXT),DISP=SHR
 //*
 //* -----------------------------------------------------------------

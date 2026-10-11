@@ -12,7 +12,7 @@ from tests.sample_steps import build_sample_steps
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE = ROOT / "sample_jcl/wire_payment_batch.jcl"
+SAMPLE = ROOT / "jcl/TEST.jcl"
 _, DECODED = build_sample_steps()
 
 
@@ -62,7 +62,7 @@ class OrchestratorTests(unittest.TestCase):
                 generator=generate,
                 validator=validate,
             )
-            self.assertEqual(result["job_name"], "WIREPAY")
+            self.assertEqual(result["job_name"], "MYTEST")
             self.assertEqual(len(result["steps"]), 9)
             self.assertEqual(len(generated), 6)
             self.assertEqual(validated, generated)
@@ -103,7 +103,7 @@ class OrchestratorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             alternate = Path(temp) / "alternate.jcl"
             source = SAMPLE.read_text(encoding="utf-8")
-            alternate.write_text(source.replace("//WIREPAY  JOB", "//ALTJOB   JOB", 1), encoding="utf-8")
+            alternate.write_text(source.replace("//MYTEST  JOB", "//ALTJOB   JOB", 1), encoding="utf-8")
             result = run_job(
                 alternate, ROOT / "cntl", Path(temp) / "outputs",
                 decoder_factory=FakeDecoderSession,
@@ -112,7 +112,7 @@ class OrchestratorTests(unittest.TestCase):
             )
             self.assertEqual(result["job_name"], "ALTJOB")
             self.assertIn("ALTJOB", result["artifacts"]["diagram"])
-            self.assertNotIn("WIREPAY", result["artifacts"]["diagram"])
+            self.assertNotIn("MYTEST", result["artifacts"]["diagram"])
 
     def test_generation_failure_cannot_pass(self):
         with tempfile.TemporaryDirectory() as temp:

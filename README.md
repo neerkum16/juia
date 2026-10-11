@@ -39,76 +39,36 @@ JUIA reads a JCL job, decodes every utility step, and produces:
 
 ## Project Structure
 
-```
+```text
 juia/
-│
-├── README.md
-├── requirements.txt
-├── .env                          # API keys and config — never commit to git
-├── .gitignore
-│
-├── corpus/
-│   ├── raw/                      # Original IBM manuals (not in git)
-│   │   ├── icea100_v3r2.pdf      # DFSORT Application Programming Guide
-│   │   ├── idau100_v3r2.pdf      # DFSMSdfp Utilities
-│   │   ├── ieab600_v2r3.pdf      # cu
-│   │   └── idai200_v2r4.pdf      # DFSMS Access Method Services (IDCAMS)
-│   │
-│   ├── extracted/                # Targeted chapter extracts — RAG input
-│   │   ├── dfsort_apg_extract.pdf
-│   │   ├── dfsmdfp_utilities_extract.pdf
-│   │   ├── mvs_jcl_reference_extract.pdf
-│   │   └── idcams_extract.pdf
-│   │
-│   ├── synthetic/                # Hand-authored annotated pattern files
-│   │   ├── dfsort_patterns.txt
-│   │   ├── idcams_patterns.txt
-│   │   └── iebgener_patterns.txt
-│   │
-│   └── vectordb/                 # ChromaDB persistent storage (auto-created)
-│
-├── scripts/
-│   ├── extract_chapters.py       # Slices IBM PDFs to targeted chapter extracts
-│   ├── ingest_corpus.py          # Chunks + embeds + loads into ChromaDB
-│   └── verify_rag.py             # Runs 18 test queries to validate retrieval
-│
-├── agent/                        # Core agent logic (Phase 2 onwards)
-│   ├── main.py
+├── agent/                        # Parser, decoder, generator, validator,
+│   ├── main.py                   # output writers, and SQLite run store
 │   ├── parser/
-│   │   ├── jcl_splitter.py
-│   │   └── utility_classifier.py
 │   ├── decoder/
-│   │   ├── rag_retriever.py
-│   │   ├── claude_decoder.py
-│   │   ├── dfsort_decoder.py
-│   │   ├── idcams_decoder.py
-│   │   └── iebgener_decoder.py
 │   ├── generator/
-│   │   ├── pyspark_generator.py
-│   │   └── synthetic_data_generator.py
 │   ├── validator/
-│   │   ├── sandbox_executor.py
-│   │   └── self_correction_loop.py
 │   ├── memory/
-│   │   └── session_store.py
 │   └── output/
-│       ├── md_writer.py
-│       └── diagram_generator.py
-│
-├── frontend/
-│   ├── Dockerfile
-│   ├── app.py
-│   ├── templates/
-│   │   └── index.html
-│   └── static/
-│       └── style.css
-│
-├── sample_jcl/
-│   ├── wire_payment_batch.jcl    # Primary demo and test JCL
-│   └── account_extract.jcl
-│
-└── outputs/                      # Generated migration specs and reports
+├── scripts/                      # Corpus tools, legacy phase drivers,
+│   ├── run_all_jcl.sh            # and sequential batch wrappers
+│   └── run_all_jcl.ps1
+├── tests/                        # Automated regression tests
+├── jcl/
+│   └── TEST.jcl    # Stable nine-step demo/test input
+├── cntl/                         # External SYSIN members for the sample
+├── corpus/
+│   ├── raw/                      # Source manuals
+│   ├── extracted/                # Focused PDFs for corpus ingestion
+│   ├── synthetic/                # Annotated patterns for ingestion
+│   └── vectordb/                 # Generated locally; ignored by Git
+├── deployment/                   # Production shipping layout guide
+├── outputs/                      # Per-run results and SQLite run index
+├── requirements.txt
+└── README.md
 ```
+
+The front end has not been created. See [deployment/README.md](deployment/README.md)
+for the files needed in a production installation.
 
 ---
 
@@ -116,33 +76,33 @@ juia/
 
 ### Prerequisites
 
-- Python 3.9 or later
-- Git Bash (for Windows path conventions)
-- Anthropic API key (Cognizant enterprise account)
+- Python with the packages in `requirements.txt`
+- Bash on Linux/Codespaces or PowerShell on Windows for batch operation
+- Anthropic API key available to the process as `ANTHROPIC_API_KEY`
 
 ### First-Time Setup
 
+From the project root, create a virtual environment and install dependencies:
+
 ```bash
-# 1. Navigate to project root
-cd C:/Users/169424/Projects/juia
-
-# 2. Create virtual environment
+# Linux / Codespaces
 python -m venv venv
-
-# 3. Activate it
-source venv/Scripts/activate
-
-# 4. Install all dependencies
-pip install -r requirements.txt
+source venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-### Environment File
-
-Create a `.env` file at the project root:
-
+```powershell
+# Windows PowerShell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
-ANTHROPIC_API_KEY=your_key_here
-```
+
+### API key
+
+Provide `ANTHROPIC_API_KEY` through the Codespaces or host environment before
+running a live conversion. The application reads `os.environ` directly; it
+does not automatically load a `.env` file. Do not commit credentials.
 
 ### requirements.txt
 
@@ -217,7 +177,7 @@ From the project root, with dependencies installed, the vector database
 populated, and `ANTHROPIC_API_KEY` available in the environment:
 
 ```bash
-python -m agent.main sample_jcl/wire_payment_batch.jcl --cntl-folder cntl --output-folder outputs
+python -m agent.main jcl/TEST.jcl --cntl-folder cntl --output-folder outputs
 ```
 
 Each invocation writes to `outputs/<job_name>/<run_id>/`, including generated
@@ -230,6 +190,42 @@ they can be committed together. To retrieve a completed or failed run:
 ```bash
 python -m agent.main --get-run RUN_ID --output-folder outputs
 ```
+
+To convert a folder of JCL files sequentially, use the platform wrapper.
+Both wrappers scan recursively for `.jcl` files, continue after a failed or
+incomplete job, and exit nonzero if any job did not succeed. They default to
+`jcl/` when that folder exists, otherwise `jcl/`. Each job still gets
+its own run folder; batch console logs and a summary are written under
+`outputs/batch_logs/<batch-id>/` by default.
+
+```bash
+# Linux / Codespaces (after activating the virtual environment)
+bash scripts/run_all_jcl.sh --jcl-folder jcl --cntl-folder cntl --output-folder outputs
+```
+
+```powershell
+# Windows PowerShell (after activating the virtual environment)
+.\scripts\run_all_jcl.ps1 -JclFolder jcl -CntlFolder cntl -OutputFolder outputs
+```
+
+An explicit JCL folder is optional when using either default folder. CNTL
+members are resolved from the single CNTL folder as each JCL is processed;
+they do not need separate invocations.
+
+### Why the wire payment sample is used in tests
+
+`jcl/TEST.jcl` is a fixed regression input. The automated
+tests assert its nine named steps, dataset lineage, generated-step counts, and
+`WIREPAY` job identity; `tests/sample_steps.py` builds mocked decoder results
+from that JCL and the sample members in `cntl/`. This gives the tests a known
+expected result without requiring an API key, vector database, or a manually
+created decoded JSON fixture. The five older `scripts/test_*.py` phase drivers
+also hardcode that file and write to shared sample paths under `outputs/`.
+
+The production entry point does not require this filename. Pass any JCL file
+to `python -m agent.main`, or give a JCL folder to a batch wrapper. Moving or
+removing the sample requires updating the phase drivers and the tests that
+refer to it; adding a new production JCL does not require a new test script.
 
 The result status is `success`, `incomplete`, or `failed`. An unresolved
 external SYSIN marks the run incomplete; setup, decode, generation, or
@@ -280,7 +276,7 @@ plain English business rule, PySpark or Python modern equivalent.
 
 ```
 Phase 0  Foundation (folder structure, venv, PDF extraction)  COMPLETE
-Phase 1  RAG Layer  (ChromaDB ingest + verification)          90% DONE
+Phase 1  RAG Layer  (ChromaDB ingest + verification)          IMPLEMENTED; LOCAL DB REQUIRED
 Phase 2  JCL Parser (jcl_splitter + utility_classifier)       IMPLEMENTED
 Phase 3  Decoder    (RAG retrieval + Claude API decode)        IMPLEMENTED
 Phase 4  Generator  (PySpark code generation)                  IMPLEMENTED
@@ -290,9 +286,11 @@ Phase 7  Orchestrator (main.py + SQLite session memory)        IMPLEMENTED
 Phase 8  Frontend   (FastAPI + HTML interface)                 NOT STARTED
 ```
 
-The integrated backend has automated tests with mocked API calls. A live
-Codespaces conversion still needs to be run against its local vector database
-and repository secret.
+The integrated backend has automated tests with mocked API calls. Live runs
+require a populated local vector database and `ANTHROPIC_API_KEY` in the
+runtime environment. Inspect each run's `result.json` and `validation.json`
+for its actual outcome; the presence of generated files alone does not mean
+all steps passed validation.
 
 ---
 
@@ -310,7 +308,7 @@ and repository secret.
 
 ## Sample Run Output
 
-For `sample_jcl/wire_payment_batch.jcl`, the JOB name is `WIREPAY`. The
+For `jcl/TEST.jcl`, the JOB name is `WIREPAY`. The
 orchestrator creates a fresh run folder each time:
 
 ```text
@@ -342,7 +340,8 @@ another checkout.
 
 ## Notes
 
-- All processing is local. No data leaves the machine.
-- Claude API calls go to Anthropic only for LLM inference.
-- IBM manuals are publicly available free PDFs — no license required.
-- The `.env` file and `corpus/raw/` PDFs are excluded from git.
+- Parsing, vector retrieval, and artifact writing run locally. Decoding,
+  generation, correction, and validation send relevant content to Anthropic.
+- The embedding model may be downloaded from Hugging Face on first use.
+- `.env` and `corpus/vectordb/` are Git-ignored; API keys belong in the
+  runtime environment or a secret manager.

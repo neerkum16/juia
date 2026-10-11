@@ -18,11 +18,11 @@
 #   python scripts/test_output.py
 #
 # OUTPUTS:
-#   outputs/wire_payment_batch_migration_spec.md   — full migration spec
-#   outputs/wire_payment_batch_lineage.mmd         — Mermaid diagram source
+#   outputs/test_jcl_migration_spec.md   — full migration spec
+#   outputs/test_jcl_lineage.mmd         — Mermaid diagram source
 #
 # HOW TO VIEW:
-#   Open outputs/wire_payment_batch_migration_spec.md on GitHub
+#   Open outputs/test_jcl_migration_spec.md on GitHub
 #   or in VS Code with the Markdown Preview extension.
 #   The Mermaid diagram renders automatically.
 # =============================================================================
@@ -52,14 +52,14 @@ from agent.output.md_writer          import assemble_migration_spec
 # SECTION 2 — CONFIGURATION
 # =============================================================================
 
-JCL_FILE_PATH      = "sample_jcl/wire_payment_batch.jcl"
+JCL_FILE_PATH      = "jcl/TEST.jcl"
 CNTL_FOLDER        = "cntl"
-DECODED_JSON_PATH  = "outputs/wire_payment_batch_decoded.json"
+DECODED_JSON_PATH  = "outputs/test_jcl_decoded.json"
 VALIDATION_PATH    = "outputs/validation_report.json"
 PYSPARK_FOLDER     = "outputs/pyspark"
 OUTPUT_FOLDER      = "outputs"
-SPEC_FILENAME      = "wire_payment_batch_migration_spec.md"
-DIAGRAM_FILENAME   = "wire_payment_batch_lineage.mmd"
+SPEC_FILENAME      = "test_jcl_migration_spec.md"
+DIAGRAM_FILENAME   = "test_jcl_lineage.mmd"
 
 
 # =============================================================================

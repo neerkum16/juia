@@ -9,7 +9,7 @@
 #   2. Splits and classifies all steps (Phase 2)
 #   3. Decodes every step using RAG + Claude (Phase 3)
 #   4. Prints the decoded result for each step to the screen
-#   5. Saves all results to outputs/wire_payment_batch_decoded.json
+#   5. Saves all results to outputs/test_jcl_decoded.json
 #
 # HOW TO RUN (from the juia project root):
 #   source venv/bin/activate
@@ -18,14 +18,14 @@
 # PREREQUISITES:
 #   - ANTHROPIC_API_KEY must be set (Codespaces secret or environment variable)
 #   - corpus/vectordb/ must exist (run ingest_corpus.py first)
-#   - sample_jcl/wire_payment_batch.jcl must exist (Phase 2)
+#   - jcl/TEST.jcl must exist (Phase 2)
 #
 # EXPECTED OUTPUT:
 #   9 steps processed:
 #     6 decoded via Claude API (IDCAMS x3, DFSORT x3)
 #     2 skipped with hardcoded result (IEBGENER DUMMY x2)
 #     1 skipped (PROGRAM step)
-#   Results saved to outputs/wire_payment_batch_decoded.json
+#   Results saved to outputs/test_jcl_decoded.json
 # =============================================================================
 
 
@@ -53,10 +53,10 @@ from agent.decoder.step_decoder      import DecoderSession
 # SECTION 2 — CONFIGURATION
 # =============================================================================
 
-JCL_FILE_PATH   = "sample_jcl/wire_payment_batch.jcl"
+JCL_FILE_PATH   = "jcl/TEST.jcl"
 CNTL_FOLDER     = "cntl"
 OUTPUT_FOLDER   = "outputs"
-OUTPUT_FILENAME = "wire_payment_batch_decoded.json"
+OUTPUT_FILENAME = "test_jcl_decoded.json"
 
 
 # =============================================================================

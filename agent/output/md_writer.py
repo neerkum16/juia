@@ -524,7 +524,7 @@ def assemble_migration_spec(job_name, jcl_filename, all_steps_data,
 
     Parameters:
         job_name       : job name string (e.g. "WIRE_PAYMENT_BATCH")
-        jcl_filename   : source JCL filename (e.g. "wire_payment_batch.jcl")
+        jcl_filename   : source JCL filename (e.g. "TEST.jcl")
         all_steps_data : list of step data dicts, each with:
                            "decoded"  : Phase 3 decoded result
                            "original" : Phase 2 parsed step

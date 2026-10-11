@@ -357,7 +357,7 @@ def classify_steps(steps):
         from agent.parser.jcl_splitter   import split_jcl_into_steps
         from agent.parser.utility_classifier import classify_steps
 
-        jcl_text = open("sample_jcl/wire_payment_batch.jcl").read()
+        jcl_text = open("jcl/TEST.jcl").read()
         steps    = split_jcl_into_steps(jcl_text)
         steps    = classify_steps(steps)
 
