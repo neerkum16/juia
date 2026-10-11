@@ -153,9 +153,10 @@ sentence-transformers
 langchain
 langchain-community
 anthropic
-fastapi
-uvicorn
 ```
+
+FastAPI and Uvicorn are planned for the frontend phase and are not yet in
+`requirements.txt`.
 
 ---
 
@@ -210,6 +211,29 @@ Writes full report to `outputs/rag_verification_report.txt`.
 source match. If results are poor, increase `CHUNK_SIZE` to 1200 in
 `ingest_corpus.py` and re-ingest.
 
+### End-to-end backend run
+
+From the project root, with dependencies installed, the vector database
+populated, and `ANTHROPIC_API_KEY` available in the environment:
+
+```bash
+python -m agent.main sample_jcl/wire_payment_batch.jcl --cntl-folder cntl --output-folder outputs
+```
+
+Each invocation writes to `outputs/<job_name>/<run_id>/`, including generated
+PySpark files, decoded and validation JSON, a Mermaid diagram, and a migration
+specification. A SQLite index at `outputs/sessions.db` stores the structured
+result. To retrieve a completed or failed run:
+
+```bash
+python -m agent.main --get-run RUN_ID --output-folder outputs
+```
+
+The result status is `success`, `incomplete`, or `failed`. An unresolved
+external SYSIN marks the run incomplete; decode, generation, or validation
+errors mark it failed. Validation is a Claude review of generated code, not
+execution of that code in Spark.
+
 ---
 
 ## RAG Corpus
@@ -248,14 +272,18 @@ plain English business rule, PySpark or Python modern equivalent.
 ```
 Phase 0  Foundation (folder structure, venv, PDF extraction)  COMPLETE
 Phase 1  RAG Layer  (ChromaDB ingest + verification)          90% DONE
-Phase 2  JCL Parser (jcl_splitter + utility_classifier)       NOT STARTED
-Phase 3  Decoder    (RAG retrieval + Claude API decode)        NOT STARTED
-Phase 4  Generator  (PySpark code generation)                  NOT STARTED
-Phase 5  Validator  (sandbox execution + self-correction)      NOT STARTED
-Phase 6  Output     (md_writer + Mermaid diagram)              NOT STARTED
-Phase 7  Orchestrator (main.py + SQLite session memory)        NOT STARTED
+Phase 2  JCL Parser (jcl_splitter + utility_classifier)       IMPLEMENTED
+Phase 3  Decoder    (RAG retrieval + Claude API decode)        IMPLEMENTED
+Phase 4  Generator  (PySpark code generation)                  IMPLEMENTED
+Phase 5  Validator  (Claude review + self-correction)          IMPLEMENTED
+Phase 6  Output     (md_writer + Mermaid diagram)              IMPLEMENTED
+Phase 7  Orchestrator (main.py + SQLite session memory)        IMPLEMENTED
 Phase 8  Frontend   (FastAPI + HTML interface)                 NOT STARTED
 ```
+
+The integrated backend has automated tests with mocked API calls. A live
+Codespaces conversion still needs to be run against its local vector database
+and repository secret.
 
 ---
 

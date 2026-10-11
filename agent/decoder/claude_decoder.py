@@ -504,8 +504,8 @@ def build_skipped_result(step, reason):
     """
     Builds a result dictionary for steps that are intentionally skipped.
 
-    Used for IEBGENER DUMMY steps (straight copy — no decoding needed)
-    and PROGRAM steps (non-utility COBOL/Assembler steps).
+    Used for IEBGENER DUMMY copies, non-utility programs, and utility
+    steps whose control cards are unavailable.
 
     Parameters:
         step   : the step dictionary
@@ -562,6 +562,24 @@ def build_skipped_result(step, reason):
                 "Consider ICEGENER (DFSORT-based) for files > 1M records."
             ),
             "decode_status"    : DECODE_STATUS_SKIPPED,
+        }
+
+    if utility_type != "PROGRAM":
+        return {
+            "step_name": step_name,
+            "utility_type": utility_type,
+            "pgm": step.get("pgm", ""),
+            "sysin_source": sysin_source,
+            "sysin_dsn": step.get("sysin_dsn", ""),
+            "business_rule": f"Utility step could not be decoded: {reason}",
+            "input_files": [],
+            "output_files": [],
+            "key_fields": [],
+            "operations": [],
+            "pyspark_hint": "",
+            "decode_confidence": "LOW",
+            "notes": reason,
+            "decode_status": DECODE_STATUS_SKIPPED,
         }
 
     # For PROGRAM steps

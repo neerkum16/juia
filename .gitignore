@@ -22,3 +22,7 @@ outputs/pyspark/*.validated
 
 # Backups after self-correction
 outputs/pyspark/backups/
+
+# Per-run backend state and generated artifacts
+outputs/sessions.db
+outputs/*/*/

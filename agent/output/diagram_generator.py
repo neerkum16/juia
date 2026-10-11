@@ -435,8 +435,8 @@ def generate_mermaid_diagram(job_name, all_steps_data):
     Parameters:
         job_name      : name of the JCL job (for the diagram title)
         all_steps_data: list of dicts, each containing:
-                          "decoded_step"  : Phase 3 decoded result
-                          "original_step" : Phase 2 parsed step
+                          "decoded"  : Phase 3 decoded result
+                          "original" : Phase 2 parsed step
 
     Returns:
         The complete Mermaid diagram as a string.
@@ -461,8 +461,8 @@ def generate_mermaid_diagram(job_name, all_steps_data):
     # -------------------------------------------------------------------------
     for step_data in all_steps_data:
 
-        decoded_step  = step_data.get("decoded_step", {})
-        original_step = step_data.get("original_step", {})
+        decoded_step  = step_data.get("decoded", {})
+        original_step = step_data.get("original", {})
 
         step_name = decoded_step.get("step_name", "UNKNOWN")
         step_id   = sanitize_node_id(step_name)
@@ -537,7 +537,7 @@ def generate_mermaid_diagram(job_name, all_steps_data):
     # Step node definitions — rectangle using [" "]
     lines.append("    %% Step nodes (rectangles)")
     for step_data in all_steps_data:
-        decoded_step = step_data.get("decoded_step", {})
+        decoded_step = step_data.get("decoded", {})
         step_name    = decoded_step.get("step_name", "UNKNOWN")
         utility_type = decoded_step.get("utility_type", "PROGRAM")
         pgm          = decoded_step.get("pgm", "")
@@ -574,7 +574,7 @@ def generate_mermaid_diagram(job_name, all_steps_data):
 
     # Apply colour classes to step nodes
     for step_data in all_steps_data:
-        decoded_step = step_data.get("decoded_step", {})
+        decoded_step = step_data.get("decoded", {})
         step_name    = decoded_step.get("step_name", "UNKNOWN")
         utility_type = decoded_step.get("utility_type", "PROGRAM")
         step_id      = sanitize_node_id(step_name)

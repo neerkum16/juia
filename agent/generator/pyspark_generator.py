@@ -475,7 +475,8 @@ def save_generated_code(code, step_name, utility_type, output_folder):
 # SECTION 7 — MAIN GENERATION FUNCTION
 # =============================================================================
 
-def generate_pyspark_code(decoded_step, original_step, api_client):
+def generate_pyspark_code(decoded_step, original_step, api_client,
+                          output_folder=PYSPARK_OUTPUT_FOLDER):
     """
     Generates a complete PySpark Python file for one JCL step.
 
@@ -483,7 +484,7 @@ def generate_pyspark_code(decoded_step, original_step, api_client):
         1. Build the generation prompt
         2. Call Claude API
         3. Clean the code response
-        4. Save to outputs/pyspark/
+        4. Save to the selected output folder
 
     Parameters:
         decoded_step  : result dictionary from Phase 3
@@ -491,6 +492,7 @@ def generate_pyspark_code(decoded_step, original_step, api_client):
         original_step : step dictionary from Phase 2
                         (sysin_content, dd_statements)
         api_client    : Anthropic client object
+        output_folder : destination for this job's generated code
 
     Returns:
         A tuple of (file_path, status):
@@ -525,7 +527,7 @@ def generate_pyspark_code(decoded_step, original_step, api_client):
         code          = clean_code,
         step_name     = step_name,
         utility_type  = utility_type,
-        output_folder = PYSPARK_OUTPUT_FOLDER
+        output_folder = output_folder
     )
 
     if file_path is None:

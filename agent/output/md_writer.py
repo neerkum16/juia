@@ -368,18 +368,19 @@ def write_decoded_step_section(step_data, validation_map, pyspark_folder):
 
     if os.path.exists(code_path):
         snippet, was_truncated = read_pyspark_snippet(code_path, MAX_PYSPARK_LINES)
-        lines.append(f"{ICON_CODE} **Full file:** `outputs/pyspark/{code_filename}`")
+        display_path = code_path.replace("\\", "/")
+        lines.append(f"{ICON_CODE} **Full file:** `{display_path}`")
         lines.append(f"")
         lines.append(f"```python")
         lines.append(snippet.rstrip())
         lines.append(f"```")
         if was_truncated:
             lines.append(f"")
-            lines.append(f"*... (truncated — see `outputs/pyspark/{code_filename}` "
+            lines.append(f"*... (truncated — see `{display_path}` "
                          f"for complete code)*")
     else:
         lines.append(f"{ICON_WARN} Generated file not found: `{code_path}`")
-        lines.append(f"Run `python scripts/test_generator.py` to generate.")
+        lines.append("Code generation failed or was not run for this job.")
 
     lines.append(f"")
     lines.append(f"---")
@@ -569,7 +570,13 @@ def assemble_migration_spec(job_name, jcl_filename, all_steps_data,
             ))
 
         else:
-            # Fallback — any other skipped step
-            sections.append(write_copy_step_section(step_data))
+            # A utility without a successful decode is incomplete, not a copy.
+            step_name = decoded.get("step_name", "UNKNOWN")
+            reason = decoded.get("notes", decoded.get("business_rule", ""))
+            sections.append(
+                f"## {step_name} — {utility_type}\n\n"
+                f"**Decode status:** {decode_status or 'unknown'}\n\n"
+                f"**Reason:** {reason}\n\n---\n"
+            )
 
     return "\n".join(sections)
