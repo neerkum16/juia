@@ -155,7 +155,7 @@
 //            DISP=(NEW,CATLG,DELETE),
 //            SPACE=(CYL,(5,2)),RECFM=FB,LRECL=200
 //SYSIN    DD *
-  SORT FIELDS=(63,3,CH,A,17,9,PD,D)
+  SORT FIELDS=(63,3,CH,A)
   SUM FIELDS=(17,9,PD)
   OUTREC FIELDS=(1,16,
                  63,3,

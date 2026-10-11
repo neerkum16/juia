@@ -2,32 +2,27 @@
 
 import re
 import unittest
-from pathlib import Path
 
 from agent.output.diagram_generator import generate_mermaid_diagram
-from scripts.test_output import build_steps_data, load_decoded_results, load_original_steps
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from tests.sample_steps import build_sample_steps
 
 
 class LineageContractTests(unittest.TestCase):
     def test_sample_steps_and_dataset_edges(self):
-        decoded, job_name = load_decoded_results(
-            str(ROOT / "tests/fixtures/wire_payment_batch_decoded.json")
-        )
-        original = load_original_steps(
-            str(ROOT / "sample_jcl/wire_payment_batch.jcl"),
-            str(ROOT / "cntl"),
-        )
-        steps_data = build_steps_data(decoded, original)
+        original, decoded = build_sample_steps()
+        steps_data = [
+            {"decoded": decoded_step, "original": original_step}
+            for original_step, decoded_step in zip(original, decoded)
+        ]
 
         self.assertEqual(len(steps_data), 9)
-        diagram = generate_mermaid_diagram(job_name, steps_data)
+        diagram = generate_mermaid_diagram("WIREPAY", steps_data)
         step_nodes = re.findall(r'^\s*(STEP\d{3})\["', diagram, re.MULTILINE)
         self.assertEqual(step_nodes, [f"STEP{i:03d}" for i in range(10, 100, 10)])
         self.assertNotIn("UNKNOWN", diagram)
         self.assertEqual(diagram.count(" --> "), 20)
+        self.assertIn('WIRE.PARMLIB(WIRECNTL)', diagram)
+        self.assertNotIn('WIRE.PARMLIB(WIRECNTL"', diagram)
         for edge in (
             "DS_WIRE_DAILY_INPUT_SEQ --> STEP030",
             "STEP030 --> DS_WIRE_WORK_EXTRT_SEQ",

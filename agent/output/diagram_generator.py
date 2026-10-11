@@ -356,7 +356,7 @@ def extract_files_from_dd(original_step):
             continue
 
         # Extract DSN value
-        dsn_match = re.search(r'DSN(?:AME)?=([^,\s)]+(?:\([^)]*\))?)',
+        dsn_match = re.search(r'DSN(?:AME)?=([^,\s(]+(?:\([^)]*\))?)',
                               parameters)
         if not dsn_match:
             continue

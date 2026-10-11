@@ -252,6 +252,10 @@ comparison operators, and statement parameters:
 Analyse the SYSIN control cards using the reference documentation above.
 Identify every business rule, filter condition, sort key, output split,
 field transformation, and data operation.
+Use the supplied SYSIN as the source of truth. For DFSORT SUM, identify the
+SORT control fields separately from the fields being summed. Records sharing
+the same SORT key must be aggregated even when their SUM-field values differ.
+Do not infer an additional sort key from the SUM card.
 
 Respond ONLY with a valid JSON object. No markdown formatting, no code
 fences, no explanation outside the JSON. Return exactly this structure:

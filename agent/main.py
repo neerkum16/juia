@@ -10,6 +10,7 @@ from agent.memory.session_store import get_run, save_run
 from agent.output.diagram_generator import generate_mermaid_diagram
 from agent.output.md_writer import assemble_migration_spec
 from agent.parser.jcl_splitter import load_jcl_from_file, split_jcl_into_steps
+from agent.parser.sort_control_validator import validate_sort_sum_layout
 from agent.parser.utility_classifier import classify_steps
 
 
@@ -72,6 +73,7 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         )
         if not original_steps:
             raise ValueError(f"No JCL steps found in {source}")
+        validate_sort_sum_layout(original_steps)
         if decoder_factory is None:
             from agent.decoder.step_decoder import DecoderSession
             decoder_factory = DecoderSession
@@ -161,6 +163,11 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         elif step_status["validation_status"] != "PASS":
             result["errors"].append(
                 f"{name}: validation {step_status['validation_status']}"
+            )
+        elif validation.get("issues_found"):
+            result["warnings"].append(
+                f"{name}: validator reported {len(validation['issues_found'])} "
+                "advisory issue(s); see validation.json"
             )
 
     steps_data = [

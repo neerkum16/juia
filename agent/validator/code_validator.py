@@ -218,6 +218,13 @@ STEP B — TRACE THE CODE (internal, do not output)
 Mentally execute the PySpark code against your synthetic records.
 Track which rows survive each filter, the sort order, and any aggregation.
 Note any discrepancies between what the code does and what the SYSIN specifies.
+Treat the original SYSIN as authoritative when the decoded business rule or
+operations disagree with it. For SUM, test two rows with the same SORT key
+and different SUM-field values; they must collapse into one summed result.
+Check that non-key fields retained from a group have an explicit selection
+rule, and do not accept unsupported claims of original input ordering.
+For OUTREC with fixed LRECL, check field order, widths, overflow handling,
+and the final record length.
 
 STEP C — PRODUCE VALIDATION REPORT (this is your entire response)
 Return ONLY a valid JSON object (no markdown, no explanation).
@@ -421,12 +428,25 @@ def build_validation_result(step_name, utility_type, code_path,
         A complete validation result dictionary.
     """
 
+    checks = parsed_response.get("checks", {})
+    if not isinstance(checks, dict):
+        checks = {}
+    failed_check = any(
+        isinstance(check, dict) and check.get("status") == STATUS_FAIL
+        for check in checks.values()
+    )
+    reported_status = parsed_response.get("overall_status", STATUS_FAIL)
+    if reported_status not in (STATUS_PASS, STATUS_FAIL):
+        reported_status = STATUS_FAIL
+    if failed_check or parsed_response.get("correction_needed", False):
+        reported_status = STATUS_FAIL
+
     result = {
         "step_name"         : step_name,
         "utility_type"      : utility_type,
         "code_path"         : code_path,
-        "validation_status" : parsed_response.get("overall_status", STATUS_FAIL),
-        "checks"            : parsed_response.get("checks", {}),
+        "validation_status" : reported_status,
+        "checks"            : checks,
         "synthetic_data_summary" : parsed_response.get("synthetic_data_summary", ""),
         "issues_found"      : parsed_response.get("issues_found", []),
         "correction_needed" : parsed_response.get("correction_needed", False),

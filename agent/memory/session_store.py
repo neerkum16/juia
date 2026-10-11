@@ -42,4 +42,27 @@ def get_run(run_id, database_path="outputs/sessions.db"):
         row = connection.execute(
             "SELECT result_json FROM runs WHERE run_id = ?", (run_id,)
         ).fetchone()
-    return json.loads(row[0]) if row else None
+    if not row:
+        return None
+    result = json.loads(row[0])
+    run_folder = database.parent / result["job_name"] / result["run_id"]
+
+    def local_path(stored_path, folder):
+        # Saved results may have originated in another Codespaces checkout.
+        candidate = folder / Path(stored_path).name
+        return str(candidate) if candidate.is_file() else stored_path
+
+    result["artifacts"] = {
+        key: local_path(path, run_folder)
+        for key, path in result.get("artifacts", {}).items()
+    }
+    result["code_paths"] = {
+        key: local_path(path, run_folder / "pyspark")
+        for key, path in result.get("code_paths", {}).items()
+    }
+    for validation in result.get("validation_results", []):
+        if validation.get("code_path"):
+            validation["code_path"] = local_path(
+                validation["code_path"], run_folder / "pyspark"
+            )
+    return result

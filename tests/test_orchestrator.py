@@ -8,11 +8,12 @@ from unittest.mock import patch
 
 from agent.main import run_job
 from agent.memory.session_store import get_run
+from tests.sample_steps import build_sample_steps
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "sample_jcl/wire_payment_batch.jcl"
-DECODED = json.loads((ROOT / "tests/fixtures/wire_payment_batch_decoded.json").read_text(encoding="utf-8"))["steps"]
+_, DECODED = build_sample_steps()
 
 
 class FakeDecoderSession:
@@ -145,6 +146,25 @@ class OrchestratorTests(unittest.TestCase):
                 get_run(result["run_id"], Path(temp) / "sessions.db")["status"],
                 "failed",
             )
+
+    def test_overlapping_sort_and_sum_fields_fail_before_decoding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            invalid = Path(temp) / "invalid.jcl"
+            invalid.write_text(
+                SAMPLE.read_text(encoding="utf-8").replace(
+                    "SORT FIELDS=(63,3,CH,A)\n  SUM FIELDS=(17,9,PD)",
+                    "SORT FIELDS=(63,3,CH,A,17,9,PD,D)\n  SUM FIELDS=(17,9,PD)",
+                ),
+                encoding="utf-8",
+            )
+            result = run_job(
+                invalid, ROOT / "cntl", Path(temp) / "outputs",
+                decoder_factory=lambda: self.fail("Invalid JCL must not be decoded"),
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("STEP070", result["errors"][0])
+            self.assertIn("overlaps SUM field", result["errors"][0])
+            self.assertTrue(Path(result["artifacts"]["result"]).is_file())
 
     def test_missing_decoder_dependency_is_reported(self):
         with tempfile.TemporaryDirectory() as temp:

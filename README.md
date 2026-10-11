@@ -330,9 +330,13 @@ outputs/WIREPAY/<run_id>/
 ```
 
 `outputs/sessions.db` indexes run results. The shared files in `outputs/`
-and `outputs/pyspark/` are from the older phase drivers. Automated tests use
-`tests/fixtures/wire_payment_batch_decoded.json`, so those shared files are
-not needed for the Phase 7 workflow or its test suite.
+and `outputs/pyspark/` are from the older phase drivers. Automated tests
+build mocked decoder responses from the current sample JCL, so those shared
+files are not needed for the Phase 7 workflow or its test suite. A fresh
+conversion creates a new run ID and new scripts. Use the run's `decoded.json`
+and `result.json` when assessing that conversion. `--get-run` resolves saved
+artifact paths against the current output folder when the run is opened from
+another checkout.
 
 ---
 

@@ -1,0 +1,18 @@
+{
+  "run_id": "91bd72c4ef334a73ae59cddbf12beed0",
+  "job_name": "WIREPAY",
+  "status": "failed",
+  "steps": [],
+  "step_statuses": [],
+  "errors": [
+    "Setup or decoding failed: STEP070: SORT field at 17,9 overlaps SUM field at 17,9"
+  ],
+  "warnings": [],
+  "review_steps": [],
+  "review_required": false,
+  "validation_results": [],
+  "artifacts": {
+    "result": "/workspaces/juia/outputs/WIREPAY/91bd72c4ef334a73ae59cddbf12beed0/result.json"
+  },
+  "code_paths": {}
+}
