@@ -1,8 +1,8 @@
 ======================================================================
   JUIA — RAG Verification Report
-  Generated : 2026-10-11 07:30:00
+  Generated : 2026-10-12 14:25:00
   Collection: juia_corpus
-  Total chunks in database: 2,885
+  Total chunks in database: 2,886
 ======================================================================
 
 ──────────────────────────────────────────────────────────────────────
@@ -225,8 +225,8 @@ Expected src : dfsort_patterns
   Result 2: GOOD | dist=0.3922 | source=dfsort_patterns | ✓ MATCH
   ZD : Balance in cents Offset 22, Length 8, Format CH : Account open date YYYYMMDD CONTROL CARDS: SORT FIELDS=(1,9,CH,A) OUTFIL FNAMES=ACTIVE, INCLUDE=(13,2,CH,EQ,C'AC') OUTFIL FNAMES=CLOSED, INCLUDE=(13,2,CH,EQ,C'CL') OUTFIL FNAMES=SUSPND, INCLUDE=(13,2,CH,EQ,C'SU') OUTFIL FNAMES=DORMANT, INCLUDE=(13,2,CH,EQ,C'DO') BUSINESS RULE: Sort all account records by account number then split into four...
 
-  Result 3: GOOD | dist=0.3950 | source=dfsort_patterns | ✓ MATCH
-  loaded and amounts balance. MODERN EQUIV (PySpark): df.agg( count("amount").alias("record_count"), spark_sum("amount").alias("total_amount"), min("amount").alias("min_amount"), max("amount").alias("max_amount") ================================================================================ PATTERN 11 — JOINKEYS: enrich transactions with account master data...
+  Result 3: GOOD | dist=0.4019 | source=dfsort_patterns | ✓ MATCH
+  ZD to fixed signed */ 10,8) /* Processing date last */ BUSINESS RULE: Rebuild the output record by selecting only the fields required downstream. Internal control code (offset 18) and batch ID (offset 22) are dropped from the output. Field order is changed: account number, name, branch, status, balance (converted from Zoned Decimal to Fixed Signed 9-byte), then date. This is a standard...
 
 
 ──────────────────────────────────────────────────────────────────────
@@ -235,14 +235,14 @@ Query 15/18: Synthetic — DFSORT high-value transaction extraction
 Search text  : wire transfer high value amount threshold pending status exception
 Expected src : dfsort_patterns
 
-  Result 1: GOOD | dist=0.4521 | source=dfsort_patterns | ✓ MATCH
-  3, Format CH : Transaction type (WIR=Wire, ACH=ACH, CHQ=Cheque) Offset 55, Length 2, Format CH : Status (PE=Pending, CM=Complete, RJ=Rejected) Offset 57, Length 4, Format CH : Reason code CONTROL CARDS: INCLUDE COND=(35,9,PD,GT,+1000000,AND,52,3,CH,EQ,C'WIR',AND,55,2,CH,EQ,C'PE') SORT FIELDS=(35,9,PD,D,44,8,CH,A) BUSINESS RULE: Extract all wire transfer transactions (type='WIR') that are still...
-
-  Result 2: MODERATE | dist=0.6993 | source=mvs_jcl_reference | ✗ MISS
+  Result 1: MODERATE | dist=0.6993 | source=mvs_jcl_reference | ✗ MISS
   atus Normal termination disposition Abnormal termination disposition At normal end of step At abnormal end of step At End of Job Step abnormally terminated If later allocation failed in step data set in step to be restarted at checkpoint DELETE KEEP PASS CATLG UNCATLG DELETE KEEP CATLG UNCATLG kept, if being used when checkpoint was taken OLD or SHR or MOD treated as old none none kept kept kept...
 
-  Result 3: POOR | dist=0.7155 | source=mvs_jcl_reference | ✗ MISS
+  Result 2: POOR | dist=0.7155 | source=mvs_jcl_reference | ✗ MISS
   assumed to be in deadlock and ended with VSAM return code 8 and reason code 22(X'16'). Specify RLSTMOUT as a value in seconds in the range of 0 to 9999. A value of 0 means that the VSAM RLS or DFSMStvs request has no timeout value; the request waits as long as necessary to obtain the required lock. The value does not apply to promote requests. A promote request is a request to change shared...
+
+  Result 3: POOR | dist=0.7279 | source=idcams | ✗ MISS
+  VGLRECL------------4086 BUFSPACE-----------29184 CISIZE-------------14336 RKP--------------------5 MAXLRECL-----------32600 EXCPEXIT----------(NULL) CI/CA------------------3 VERSION-NUMBER---------1 STRIPE-COUNT-----------1 SHROPTNS(1,3) RECOVERY UNIQUE NOERASE INDEXED NOWRITECHK UNORDERED NOREUSE NONSPANNED EXTENDED CCSID--------------65535 STATISTICS REC-TOTAL------------180...
 
 
 ──────────────────────────────────────────────────────────────────────
@@ -309,10 +309,10 @@ SUMMARY
   12. JCL — EXEC statement COND parameter                EXCELLENT  HIT
   13. JCL — DCB sub-parameters for dataset attributes    GOOD       HIT
   14. Synthetic — DFSORT account filter pattern with PyS GOOD       HIT
-  15. Synthetic — DFSORT high-value transaction extracti GOOD       HIT
+  15. Synthetic — DFSORT high-value transaction extracti MODERATE   miss
   16. Synthetic — IDCAMS REPRO with REPLACE parameter    GOOD       HIT
   17. Synthetic — IDCAMS delete and redefine pattern     GOOD       HIT
   18. Synthetic — IEBGENER plain copy pattern            GOOD       miss
 
-  Corpus health : 100% (18/18 GOOD or better)
+  Corpus health : 94% (17/18 GOOD or better)
 ======================================================================
