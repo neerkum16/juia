@@ -35,13 +35,9 @@ function Resolve-ProjectPath {
     return [System.IO.Path]::GetFullPath((Join-Path $projectRoot $Value))
 }
 
-# usable without editing this script. An explicit -JclFolder overrides both.
+# Use the repository's jcl/ folder unless -JclFolder names another folder.
 if ([string]::IsNullOrWhiteSpace($JclFolder)) {
-    if (Test-Path -LiteralPath (Join-Path $projectRoot 'jcl') -PathType Container) {
-        $JclFolder = 'jcl'
-    } else {
-        $JclFolder = 'jcl'
-    }
+    $JclFolder = 'jcl'
 }
 
 $jclDir = Resolve-ProjectPath $JclFolder

@@ -3,7 +3,7 @@
 //             NOTIFY=&SYSUID
 //*
 //* =================================================================
-//* JOB  : WIREPAY
+//* JOB  : MYTEST
 //* DESC : Daily Wire Payment Processing Batch Job
 //*
 //* RECORD LAYOUT — WIRE TRANSACTION FILE (LRECL=200)

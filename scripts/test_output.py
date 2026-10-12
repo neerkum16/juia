@@ -214,6 +214,7 @@ def save_file(content, folder, filename):
 # =============================================================================
 
 def main():
+    """Combine saved phase reports into the sample diagram and spec."""
 
     print("=" * 65)
     print("  JUIA — Phase 6 Output Assembly")

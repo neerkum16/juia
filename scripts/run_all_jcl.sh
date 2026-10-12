@@ -30,7 +30,7 @@ Usage: bash scripts/run_all_jcl.sh [options]
 
 Options:
   --jcl-folder PATH     Folder to scan recursively for .jcl files.
-                        Defaults to jcl/ if present, otherwise jcl/.
+                        Defaults to jcl/.
   --cntl-folder PATH    Local CNTL member folder (default: cntl/).
   --output-folder PATH  Per-run artifacts and sessions.db (default: outputs/).
   --log-folder PATH     Batch logs; default: outputs/batch_logs/<batch-id>/.

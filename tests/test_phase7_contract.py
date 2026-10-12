@@ -1,6 +1,12 @@
-"""Integration checks for the job-level phase handoffs, without API calls."""
+"""Exercise orchestration, artifacts, and failure reporting without API calls.
+
+The sample JCL and CNTL files pass through the real parser. Fake decoder,
+generator, and validator stages make it possible to verify phase boundaries,
+run isolation, persistence, and status rules deterministically.
+"""
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,18 +17,24 @@ from agent.memory.session_store import get_run
 from tests.sample_steps import build_sample_steps
 
 
+# Anchor sample inputs to this file so test discovery works from any folder.
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "jcl/TEST.jcl"
 _, DECODED = build_sample_steps()
 
 
 class FakeDecoderSession:
+    """Supply parsed-step-aligned decoder responses without Claude or RAG."""
     api_client = object()
 
     def is_ready(self):
+        """Declare the fake decoder ready without loading API resources."""
         return True
 
     def decode_all_steps(self, steps):
+        """Return fixture results only when parser order still matches."""
+        # The orchestrator pairs results with JCL steps by position; fail the
+        # test immediately if that shared contract changes.
         assert [step["step_name"] for step in steps] == [
             decoded["step_name"] for decoded in DECODED
         ]
@@ -30,10 +42,15 @@ class FakeDecoderSession:
 
 
 class OrchestratorTests(unittest.TestCase):
+    """Check the backend result contract and each important failure path."""
+
     def test_sample_runs_through_all_phases(self):
+        """Build and retrieve one complete run, then prove a rerun is fresh."""
         with tempfile.TemporaryDirectory() as temp:
             generated = []
             validated = []
+            # Place stale files in the old shared output locations. A correct
+            # run creates fresh artifacts below its own job and run ID.
             legacy = Path(temp) / "outputs/pyspark"
             legacy.mkdir(parents=True)
             (legacy / "STEP030_DFSORT.validated").write_text("PASS", encoding="utf-8")
@@ -43,6 +60,9 @@ class OrchestratorTests(unittest.TestCase):
             )
 
             def generate(decoded, original, client, output_folder):
+                """Write a fake generated file to the requested run folder."""
+                # Record phase calls and write only to the folder supplied by
+                # the orchestrator, as the real generator must do.
                 self.assertEqual(decoded["step_name"], original["step_name"])
                 code_folder = Path(output_folder)
                 code_folder.mkdir(parents=True, exist_ok=True)
@@ -52,6 +72,8 @@ class OrchestratorTests(unittest.TestCase):
                 return str(path), "success"
 
             def validate(decoded, original, code_path, client):
+                """Pass only code files created by the current run."""
+                # Validation must see a newly created code file for this run.
                 self.assertTrue(Path(code_path).is_file())
                 validated.append(decoded["step_name"])
                 return {"step_name": decoded["step_name"], "validation_status": "PASS"}
@@ -62,6 +84,8 @@ class OrchestratorTests(unittest.TestCase):
                 generator=generate,
                 validator=validate,
             )
+            # Six utility steps generate code; skipped PROGRAM and dummy
+            # IEBGENER steps still appear among the nine decoded JCL steps.
             self.assertEqual(result["job_name"], "MYTEST")
             self.assertEqual(len(result["steps"]), 9)
             self.assertEqual(len(generated), 6)
@@ -73,6 +97,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIn("STEP030 --> DS_WIRE_WORK_EXTRT_SEQ", diagram)
             self.assertEqual(diagram.count(" --> "), 20)
             stored = get_run(result["run_id"], Path(temp) / "outputs/sessions.db")
+            # SQLite and result.json must expose the same run contract.
             self.assertEqual(stored["status"], "success")
             self.assertEqual(stored["artifacts"], result["artifacts"])
             self.assertEqual(
@@ -86,6 +111,8 @@ class OrchestratorTests(unittest.TestCase):
                 generator=generate,
                 validator=validate,
             )
+            # New IDs, validation paths, and code paths prove that stale
+            # reports cannot silently pass a later invocation.
             self.assertNotEqual(result["run_id"], second["run_id"])
             self.assertNotEqual(result["artifacts"]["validation"], second["artifacts"]["validation"])
             self.assertNotEqual(result["code_paths"]["STEP030"], second["code_paths"]["STEP030"])
@@ -100,10 +127,16 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIsNone(get_run("missing", Path(temp) / "outputs/sessions.db"))
 
     def test_jcl_job_name_controls_output_path(self):
+        """Prefer the JOB card identity to an unrelated source filename."""
         with tempfile.TemporaryDirectory() as temp:
             alternate = Path(temp) / "alternate.jcl"
             source = SAMPLE.read_text(encoding="utf-8")
-            alternate.write_text(source.replace("//MYTEST  JOB", "//ALTJOB   JOB", 1), encoding="utf-8")
+            # Match legal JCL spacing rather than a fixed number of blanks.
+            changed, count = re.subn(
+                r"(?m)^//MYTEST[ \t]+JOB\b", "//ALTJOB JOB", source, count=1
+            )
+            self.assertEqual(count, 1, "Expected a MYTEST JOB card in TEST.jcl")
+            alternate.write_text(changed, encoding="utf-8")
             result = run_job(
                 alternate, ROOT / "cntl", Path(temp) / "outputs",
                 decoder_factory=FakeDecoderSession,
@@ -115,6 +148,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertNotIn("MYTEST", result["artifacts"]["diagram"])
 
     def test_generation_failure_cannot_pass(self):
+        """A generator error remains failed and never calls validation."""
         with tempfile.TemporaryDirectory() as temp:
             result = run_job(
                 SAMPLE, ROOT / "cntl", temp,
@@ -132,6 +166,7 @@ class OrchestratorTests(unittest.TestCase):
             )
 
     def test_setup_failure_is_retrievable(self):
+        """Index a missing-input failure so users can inspect it by run ID."""
         with tempfile.TemporaryDirectory() as temp:
             result = run_job(
                 Path(temp) / "missing.jcl", ROOT / "cntl", temp,
@@ -148,6 +183,7 @@ class OrchestratorTests(unittest.TestCase):
             )
 
     def test_overlapping_sort_and_sum_fields_fail_before_decoding(self):
+        """Reject an invalid DFSORT layout before invoking the decoder."""
         with tempfile.TemporaryDirectory() as temp:
             invalid = Path(temp) / "invalid.jcl"
             invalid.write_text(
@@ -167,7 +203,10 @@ class OrchestratorTests(unittest.TestCase):
             self.assertTrue(Path(result["artifacts"]["result"]).is_file())
 
     def test_missing_decoder_dependency_is_reported(self):
+        """Report an unavailable decoder import as a stored failed run."""
         with tempfile.TemporaryDirectory() as temp:
+            # Simulate a missing optional module without changing the local
+            # Python environment or invoking external services.
             with patch.dict("sys.modules", {"agent.decoder.step_decoder": None}):
                 result = run_job(
                     SAMPLE, ROOT / "cntl", temp,
@@ -182,8 +221,11 @@ class OrchestratorTests(unittest.TestCase):
             )
 
     def test_decoder_error_cannot_pass(self):
+        """Retain an API decode error even if other steps might proceed."""
         class ErrorDecoder(FakeDecoderSession):
+            """Mark one otherwise valid step as an API failure."""
             def decode_all_steps(self, steps):
+                """Return an API error for STEP010 and normal other steps."""
                 results = [dict(decoded) for decoded in DECODED]
                 results[0].update(decode_status="api_error", notes="API unavailable")
                 return results
@@ -200,8 +242,10 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(result["step_statuses"][0]["generation_status"], "not_run")
 
     def test_failed_validation_cannot_pass(self):
+        """Keep a completed generation failed when validation says FAIL."""
         with tempfile.TemporaryDirectory() as temp:
             def generate(decoded, original, client, output_folder):
+                """Write fake code so validation status drives the outcome."""
                 path = Path(output_folder) / f'{decoded["step_name"]}_{decoded["utility_type"]}.py'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# generated\n", encoding="utf-8")
@@ -220,14 +264,19 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(len(result["errors"]), 6)
 
     def test_exhausted_validation_review_keeps_run_successful(self):
+        """Expose REVIEW after three corrections while preserving the run."""
         with tempfile.TemporaryDirectory() as temp:
             def generate(decoded, original, client, output_folder):
+                """Write fake code for every decodable utility step."""
                 path = Path(output_folder) / f'{decoded["step_name"]}_{decoded["utility_type"]}.py'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# generated\n", encoding="utf-8")
                 return str(path), "success"
 
             def validate(decoded, original, path, client):
+                """Require review for STEP070 and pass the other steps."""
+                # Only STEP070 reaches the review boundary; other generated
+                # steps pass so the mixed result is easy to inspect.
                 if decoded["step_name"] == "STEP070":
                     return {
                         "step_name": "STEP070", "validation_status": "REVIEW",
@@ -257,8 +306,11 @@ class OrchestratorTests(unittest.TestCase):
             )
 
     def test_unresolved_cntl_marks_run_incomplete(self):
+        """Keep a run incomplete when external control members are absent."""
         class MissingCntlDecoder(FakeDecoderSession):
+            """Mirror the real decoder's skipped status for missing CNTL."""
             def decode_all_steps(self, steps):
+                """Skip steps whose external control member was not found."""
                 results = [dict(decoded) for decoded in DECODED]
                 for step, decoded in zip(steps, results):
                     if step["sysin_source"] == "external_unresolved":
@@ -267,6 +319,7 @@ class OrchestratorTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             def generate(decoded, original, client, output_folder):
+                """Write fake code for steps that still have control cards."""
                 path = Path(output_folder) / f'{decoded["step_name"]}_{decoded["utility_type"]}.py'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# generated\n", encoding="utf-8")
@@ -280,6 +333,8 @@ class OrchestratorTests(unittest.TestCase):
                     "step_name": decoded["step_name"], "validation_status": "PASS"
                 },
             )
+            # Both external SORT cards are missing in the temporary CNTL
+            # folder, and neither may be counted as a successful conversion.
             self.assertEqual(result["status"], "incomplete")
             self.assertEqual(len(result["warnings"]), 2)
             self.assertTrue(any("STEP030" in warning for warning in result["warnings"]))

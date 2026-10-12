@@ -232,6 +232,7 @@ def get_step_files(decoded_step, original_step):
 
     # Filter out non-dataset entries like SYSOUT=*, SYSPRINT, DUMMY
     def is_dataset(name):
+        """Keep real dataset names and discard print/dummy DD targets."""
         upper = str(name).upper().strip()
         return bool(upper) and not (
             upper.startswith("SYSOUT")

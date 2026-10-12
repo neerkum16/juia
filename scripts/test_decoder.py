@@ -64,6 +64,7 @@ OUTPUT_FILENAME = "test_jcl_decoded.json"
 # =============================================================================
 
 def separator(char="─", width=65):
+    """Print a consistent divider between decoder report sections."""
     print(char * width)
 
 
@@ -200,7 +201,7 @@ def save_results_to_json(all_results, output_folder, output_filename):
 
     # Build the output structure
     output_data = {
-        "job_name"    : "WIREPAY",
+        "job_name"    : "MYTEST",
         "jcl_file"    : JCL_FILE_PATH,
         "total_steps" : len(all_results),
         "steps"       : all_results
@@ -218,6 +219,7 @@ def save_results_to_json(all_results, output_folder, output_filename):
 # =============================================================================
 
 def main():
+    """Parse the sample job, decode each step, and save a phase report."""
 
     print("=" * 65)
     print("  JUIA — Phase 3 Decoder Test")

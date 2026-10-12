@@ -481,8 +481,10 @@ def write_report(test_results, all_raw_results, total_chunks_in_db):
 
     with open(report_path, "w", encoding="utf-8") as report_file:
 
-        # Helper function to write a line to both screen and file
+        # Keep report formatting in one place; this helper writes to the
+        # report file only, while console output is handled elsewhere.
         def write(line=""):
+            """Append one report line with a terminating newline."""
             report_file.write(line + "\n")
 
         write("=" * 70)

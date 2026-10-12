@@ -141,6 +141,7 @@ def build_original_step_map(jcl_file_path, cntl_folder):
 # =============================================================================
 
 def main():
+    """Generate PySpark files from the sample's saved decoded results."""
 
     print("=" * 65)
     print("  JUIA — Phase 4 PySpark Generator")

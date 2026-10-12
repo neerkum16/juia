@@ -319,7 +319,7 @@ def save_validation_report(all_results, report_path):
     total_fixes = sum(r.get("corrections_applied", 0) for r in merged_results)
 
     report = {
-        "job_name"            : "WIREPAY",
+        "job_name"            : "MYTEST",
         "total_steps_validated": len(merged_results),
         "pass_count"          : pass_count,
         "fail_count"          : fail_count,
@@ -340,6 +340,7 @@ def save_validation_report(all_results, report_path):
 # =============================================================================
 
 def main():
+    """Validate generated sample scripts and write the phase report."""
 
     print("=" * 65)
     print("  JUIA — Phase 5 Code Validator")

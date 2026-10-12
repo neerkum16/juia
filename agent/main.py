@@ -1,4 +1,10 @@
-"""Run the existing JUIA phases for one JCL job."""
+"""Run one JCL job through the existing modernization phases.
+
+The command-line entry point parses and classifies the job, decodes its
+steps, generates and validates PySpark, then writes a diagram and migration
+specification. Every invocation receives a new run ID so its files and
+stored result can be inspected independently of earlier runs.
+"""
 
 import argparse
 import json
@@ -14,16 +20,23 @@ from agent.parser.sort_control_validator import validate_sort_sum_layout
 from agent.parser.utility_classifier import classify_steps
 
 
+# Job identity and JSON output helpers.
 def get_job_name(jcl_text, source_path):
-    """Use the JCL JOB name, falling back to the input filename."""
+    """Use the JCL JOB name, falling back to the input filename.
+
+    The JOB card controls the output directory even when the JCL file has a
+    different name. The fallback keeps malformed or partial inputs traceable.
+    """
     match = re.search(r"^//([A-Za-z0-9@$#]+)\s+JOB\b", jcl_text, re.MULTILINE | re.IGNORECASE)
     return match.group(1).upper() if match else Path(source_path).stem.upper()
 
 
 def write_json(path, data):
+    """Write an artifact in readable UTF-8 JSON, retaining non-ASCII text."""
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+# One-job orchestration. The phase implementations remain in their own modules.
 def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             decoder_factory=None, generator=None, validator=None):
     """Parse, decode, generate, validate, and assemble one migration spec.
@@ -31,9 +44,13 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     Injectable phase callables let the integration contract be tested without
     making external API calls. Production calls the existing phase functions.
     """
+    # Create the run identity before touching the input. Even a setup failure
+    # must have a distinct result that the caller can retrieve later.
     source = Path(jcl_path)
     run_id = uuid4().hex
     job_name = source.stem.upper()
+    # This shape is the backend result contract consumed by the CLI and UI.
+    # Start as failed so an early exception can never appear successful.
     result = {
         "run_id": run_id,
         "job_name": job_name,
@@ -51,6 +68,9 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     database_path = Path(output_folder) / "sessions.db"
 
     def finish():
+        """Write the final JSON result and index it by run ID in SQLite."""
+        # Recompute the folder from the resolved JOB name. Before parsing,
+        # result["job_name"] still holds the input filename fallback.
         run_folder = Path(output_folder) / result["job_name"] / run_id
         result_path = run_folder / "result.json"
         try:
@@ -61,10 +81,14 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             result["artifacts"].pop("result", None)
             result["errors"].append(f"Could not write run result: {error}")
             result["status"] = "failed"
+        # The SQLite row makes both successful and failed runs retrievable
+        # without searching through output folders.
         save_run(result, database_path)
         return result
 
     try:
+        # Parse the original JCL first; CNTL members are resolved by the
+        # splitter, and the classifier supplies the utility type per step.
         jcl_text = load_jcl_from_file(str(source))
         job_name = get_job_name(jcl_text, source)
         result["job_name"] = job_name
@@ -73,7 +97,11 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         )
         if not original_steps:
             raise ValueError(f"No JCL steps found in {source}")
+        # Reject a simple, known-invalid DFSORT layout before spending API
+        # calls on decoding and generation.
         validate_sort_sum_layout(original_steps)
+        # Import the API-dependent modules only for a real run. Tests inject
+        # lightweight phase functions so they can verify the handoffs offline.
         if decoder_factory is None:
             from agent.decoder.step_decoder import DecoderSession
             decoder_factory = DecoderSession
@@ -86,6 +114,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         session = decoder_factory()
         if not session.is_ready():
             raise RuntimeError("Decoder resources are not ready")
+        # Positional alignment is required because each decoded result is
+        # paired with its original step for code generation and validation.
         decoded_steps = session.decode_all_steps(original_steps)
         if len(decoded_steps) != len(original_steps):
             raise RuntimeError("Decoder did not return one result per JCL step")
@@ -96,12 +126,15 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         result["errors"].append(f"Setup or decoding failed: {error}")
         return finish()
 
+    # Generated code and reports live below this run's unique folder.
     output = Path(output_folder) / job_name / run_id
     code_folder = output / "pyspark"
     result["steps"] = decoded_steps
     validation_results = []
     code_paths = {}
     incomplete = False
+    # Process steps in JCL order. Each status records how far that step got,
+    # even if a later phase fails or an expected control member is missing.
     for original, decoded in zip(original_steps, decoded_steps):
         name = original["step_name"]
         utility = original.get("utility_type", "UNKNOWN")
@@ -114,6 +147,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             "validation_status": "not_run",
         }
         result["step_statuses"].append(step_status)
+        # An unresolved CNTL member leaves the utility's instructions unknown;
+        # recording it as incomplete prevents a misleading successful run.
         if original.get("sysin_source") == "external_unresolved":
             incomplete = True
             result["warnings"].append(
@@ -126,6 +161,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
                 (utility == "IEBGENER" and original.get("sysin_source") == "dummy")
             ):
                 continue
+            # PROGRAM and dummy IEBGENER steps are intentionally skipped.
+            # Other skips are gaps; API/decode errors are failures.
             message = f"{name}: decode status {decode_status}: {decoded.get('notes', '')}"
             if decode_status == "skipped":
                 incomplete = True
@@ -133,6 +170,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             else:
                 result["errors"].append(message)
             continue
+        # Reuse the existing generator and validator; their results are
+        # attached to this step rather than inferred from old output files.
         try:
             code_path, generation_status = generator(
                 decoded, original, session.api_client, output_folder=str(code_folder)
@@ -154,6 +193,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             }
         validation_results.append(validation)
         step_status["validation_status"] = validation.get("validation_status", "ERROR")
+        # REVIEW is an explicit handoff after correction retries. It permits
+        # a completed run while preserving the need for a human decision.
         if step_status["validation_status"] == "REVIEW":
             result["review_steps"].append(name)
             result["review_required"] = True
@@ -170,6 +211,8 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
                 "advisory issue(s); see validation.json"
             )
 
+    # The diagram and spec need both the original DD/control cards and the
+    # decoded interpretation. Map validation by name for their per-step text.
     steps_data = [
         {"decoded": decoded, "original": original}
         for original, decoded in zip(original_steps, decoded_steps)
@@ -177,11 +220,15 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     validation_map = {item["step_name"]: item for item in validation_results}
     result["validation_results"] = validation_results
     result["code_paths"] = code_paths
+    # Errors outrank incomplete work; REVIEW remains a successful run with
+    # review_required=True as agreed by the backend result contract.
     result["status"] = (
         "failed" if result["errors"] else
         "incomplete" if incomplete else "success"
     )
     try:
+        # Write every artifact into this run folder. No report from an older
+        # invocation can be mistaken for a fresh validation result.
         diagram = generate_mermaid_diagram(job_name, steps_data)
         spec = assemble_migration_spec(
             job_name, source.name, steps_data, validation_map, diagram, str(code_folder)
@@ -204,13 +251,16 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     return finish()
 
 
+# Command-line interface for conversion and stored-result lookup.
 def main():
+    """Parse CLI arguments, print the structured result, and set exit status."""
     parser = argparse.ArgumentParser(description="Convert a JCL job to a migration specification")
     parser.add_argument("jcl_path", nargs="?")
     parser.add_argument("--cntl-folder", default="cntl")
     parser.add_argument("--output-folder", default="outputs")
     parser.add_argument("--get-run", metavar="RUN_ID")
     args = parser.parse_args()
+    # Lookup reads the SQLite index; it does not rerun decoding or generation.
     if args.get_run:
         result = get_run(args.get_run, Path(args.output_folder) / "sessions.db")
         if result is None:
@@ -221,6 +271,7 @@ def main():
         parser.error("jcl_path is required unless --get-run is used")
     result = run_job(args.jcl_path, args.cntl_folder, args.output_folder)
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    # Batch wrappers can stop or report a problem from the process exit code.
     if result["status"] != "success":
         raise SystemExit(1)
 

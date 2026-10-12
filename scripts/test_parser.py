@@ -60,6 +60,7 @@ SYSIN_DISPLAY_LIMIT = 2000
 # =============================================================================
 
 def separator(char="─", width=65):
+    """Print a consistent divider between parser report sections."""
     print(char * width)
 
 
@@ -179,6 +180,7 @@ def print_summary(steps, breakdown):
 # =============================================================================
 
 def main():
+    """Show parsed sample steps and where their control cards came from."""
     print("=" * 65)
     print("  JUIA — Phase 2 Parser Test (with external SYSIN support)")
     print("=" * 65)

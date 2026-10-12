@@ -467,8 +467,8 @@ def create_new_step(step_name, pgm, exec_statement_line):
         "exec_statement"  : exec_statement_line,
         "dd_statements"   : [],
 
-        # Full text of SYSIN content — this is what the decoder reads.
-        # Populated whether SYSIN is inline or read from local cntl/ file.
+        # Full control-card text read by the decoder. ICETOOL uses TOOLIN;
+        # other supported utilities use SYSIN.
         "sysin_content"   : "",
 
         # How the SYSIN content was obtained — see SYSIN_SOURCE constants
@@ -532,7 +532,7 @@ def finish_inline_data_collection(current_step, current_dd,
     if current_dd is not None:
         current_dd["inline_content"] = inline_text
 
-    if ddname.upper() == "SYSIN":
+    if ddname.upper() in {"SYSIN", "TOOLIN"}:
         current_step["sysin_content"] = inline_text
         current_step["sysin_source"]  = SYSIN_SOURCE_INLINE
 
@@ -547,11 +547,12 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
 
     This is the main function of this module.
 
-    SYSIN HANDLING:
-        Inline SYSIN (DD *)        : content read directly from JCL
-        External SYSIN (DD DSN=..) : content read from local cntl/ folder
-        Dummy SYSIN (DD DUMMY)     : sysin_content="" sysin_source="dummy"
-        No SYSIN                   : sysin_content="" sysin_source="none"
+    CONTROL-CARD HANDLING:
+        SYSIN for most utilities and TOOLIN for ICETOOL use the same fields.
+        Inline DD *        : content read directly from JCL
+        External DD DSN=.. : content read from local cntl/ folder
+        DD DUMMY           : sysin_content="" sysin_source="dummy"
+        No control DD      : sysin_content="" sysin_source="none"
 
     Parameters:
         jcl_text    : string containing the full JCL job text
@@ -690,8 +691,13 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
 
                 ddname_upper = name.upper()
 
-                # Determine SYSIN handling based on parameters
-                if ddname_upper == "SYSIN":
+                # ICETOOL reads operators from TOOLIN. Store them in the
+                # established sysin_* step fields used by the decoder.
+                is_control_dd = ddname_upper == "SYSIN" or (
+                    ddname_upper == "TOOLIN"
+                    and current_step.get("pgm", "").upper() == "ICETOOL"
+                )
+                if is_control_dd:
 
                     if is_dummy_sysin(parameters):
                         # DD DUMMY — no content, mark as dummy
