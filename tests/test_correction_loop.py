@@ -35,7 +35,7 @@ class CorrectionLoopTests(unittest.TestCase):
             def correct(**kwargs):
                 """Return visibly different code for each requested retry."""
                 # The attempt number makes the final on-disk version visible.
-                return f"correction {kwargs['attempt_number']}\n"
+                return f"print('correction {kwargs['attempt_number']}')\n"
 
             # Patch only the external phase calls; the real retry loop and
             # file replacement path remain under test.
@@ -54,7 +54,7 @@ class CorrectionLoopTests(unittest.TestCase):
             self.assertTrue(result["review_required"])
             self.assertEqual(result["corrections_applied"], 3)
             self.assertEqual(len(result["correction_history"]), 3)
-            self.assertEqual(code_path.read_text(encoding="utf-8"), "correction 3\n")
+            self.assertEqual(code_path.read_text(encoding="utf-8"), "print('correction 3')\n")
             self.assertEqual(list(Path(temp).glob("**/*.bak_*")), [])
             self.assertFalse((Path(temp) / "backups").exists())
 

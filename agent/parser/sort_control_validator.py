@@ -14,22 +14,28 @@ def _fields(sysin, statement, width):
     SORT entries have four comma-separated parts and SUM entries have three;
     width identifies the corresponding card shape.
     """
-    # Match the card body first. A missing statement is valid for this guard
-    # and produces no fields to compare.
+    # Absence means no fields to compare. A present but unsupported card
+    # returns None so callers cannot mistake it for an empty field list.
+    if not re.search(rf"\b{statement}\s+FIELDS\s*=", sysin, re.I):
+        return []
+    if re.search(rf"\b{statement}\s+FIELDS\s*=\s*(?:NONE|COPY)\b", sysin, re.I):
+        return []
     match = re.search(rf"\b{statement}\s+FIELDS\s*=\s*\(([^)]*)\)", sysin, re.I)
     if not match:
-        return []
+        return None
     # Split fixed-width tuples into their position and length components.
     parts = [part.strip() for part in match.group(1).split(",")]
     if len(parts) % width:
-        return []  # Complex or unsupported syntax belongs to the decoder.
+        return None
     fields = []
     for offset in range(0, len(parts), width):
         position, length = parts[offset : offset + 2]
         # Non-numeric expressions need full utility interpretation, so this
         # lightweight precheck deliberately declines to parse them.
         if not position.isdigit() or not length.isdigit():
-            return []
+            return None
+        if int(position) <= 0 or int(length) <= 0:
+            return None
         fields.append((int(position), int(length)))
     return fields
 
@@ -46,6 +52,12 @@ def validate_sort_sum_layout(steps):
         sysin = step.get("sysin_content", "")
         sort_fields = _fields(sysin, "SORT", 4)
         sum_fields = _fields(sysin, "SUM", 3)
+        if sort_fields is None or sum_fields is None:
+            step.setdefault("unsupported_constructs", []).append(
+                f"{step['step_name']}: SORT/SUM layout could not be prevalidated; "
+                "manual control-card interpretation is required"
+            )
+            continue
         # Each field occupies [start, start + length). Comparing the larger
         # start with the smaller end finds overlap without enumerating bytes.
         for sort_start, sort_length in sort_fields:

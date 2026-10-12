@@ -317,6 +317,12 @@ def call_claude_api(prompt, api_client):
             ]
         )
 
+        # A syntactically valid prefix can still omit business rules when the
+        # response hits the output limit. Never treat that prefix as decoded.
+        if getattr(message, "stop_reason", None) == "max_tokens":
+            print(f"  [ERROR] Decode response reached the {MAX_TOKENS}-token limit.")
+            return None
+
         # message.content is a list of content blocks.
         # For a text response, we want the first block's text.
         response_text = message.content[0].text
@@ -371,6 +377,19 @@ def parse_json_response(response_text):
     cleaned = re.sub(r'^```\s*',     '', cleaned, flags=re.MULTILINE)
     cleaned = cleaned.strip()
 
+    # Prefer the complete response. A JSON array containing one object must
+    # remain an array and fail the object contract, rather than being silently
+    # accepted by slicing out its first and last braces below.
+    try:
+        complete = json.loads(cleaned)
+    except json.JSONDecodeError:
+        complete = None
+    else:
+        if not isinstance(complete, dict):
+            print("  [ERROR] Claude returned JSON that is not an object.")
+            return None
+        return complete
+
     # Find the first { and last } to extract just the JSON object
     # This handles cases where Claude adds text before or after the JSON
     first_brace = cleaned.find('{')
@@ -385,12 +404,68 @@ def parse_json_response(response_text):
 
     try:
         parsed = json.loads(json_text)
+        if not isinstance(parsed, dict):
+            print("  [ERROR] Claude returned JSON that is not an object.")
+            return None
         return parsed
 
     except json.JSONDecodeError as error:
         print(f"  [ERROR] Could not parse Claude's JSON response: {error}")
         print(f"  JSON text preview: {json_text[:300]}")
         return None
+
+
+def validate_decoded_response(decoded_data):
+    """Return contract errors before a model response reaches generation.
+
+    Empty input/output or key-field lists are legitimate for some utilities.
+    Their presence and element types still matter: later phases join file
+    lists, iterate field dictionaries, and rely on a business description.
+    """
+
+    errors = []
+    if not isinstance(decoded_data, dict):
+        return ["decoded response must be a JSON object"]
+
+    text_fields = ("business_rule", "pyspark_hint", "decode_confidence", "notes")
+    for name in text_fields:
+        if not isinstance(decoded_data.get(name), str):
+            errors.append(f"{name} must be a string")
+    if isinstance(decoded_data.get("business_rule"), str) and not decoded_data["business_rule"].strip():
+        errors.append("business_rule must not be empty")
+    if decoded_data.get("decode_confidence") not in ("HIGH", "MEDIUM", "LOW"):
+        errors.append("decode_confidence must be HIGH, MEDIUM, or LOW")
+
+    for name in ("input_files", "output_files"):
+        files = decoded_data.get(name)
+        if not isinstance(files, list) or any(
+            not isinstance(item, str) or not item.strip() for item in files
+        ):
+            errors.append(f"{name} must be a list of nonempty dataset names")
+
+    key_fields = decoded_data.get("key_fields")
+    if not isinstance(key_fields, list):
+        errors.append("key_fields must be a list")
+    else:
+        for index, field in enumerate(key_fields):
+            if not isinstance(field, dict) or not all(
+                isinstance(field.get(name), int) and not isinstance(field.get(name), bool)
+                and field[name] > 0 for name in ("offset", "length")
+            ) or not all(isinstance(field.get(name), str) and field[name].strip()
+                         for name in ("format", "meaning")):
+                errors.append(f"key_fields[{index}] needs positive offset/length and format/meaning")
+
+    operations = decoded_data.get("operations")
+    if not isinstance(operations, list):
+        errors.append("operations must be a list")
+    else:
+        for index, operation in enumerate(operations):
+            if not isinstance(operation, dict) or not all(
+                isinstance(operation.get(name), str) and operation[name].strip()
+                for name in ("type", "description")
+            ):
+                errors.append(f"operations[{index}] needs type and description")
+    return errors
 
 
 # =============================================================================
@@ -442,6 +517,14 @@ def decode_with_claude(step, rag_context, api_client):
         return build_error_result(step, DECODE_STATUS_PARSE_ERROR,
                                    "Could not parse Claude's JSON response",
                                    raw_response=response_text)
+
+    contract_errors = validate_decoded_response(decoded_data)
+    if contract_errors:
+        return build_error_result(
+            step, DECODE_STATUS_PARSE_ERROR,
+            "Invalid decoded response: " + "; ".join(contract_errors),
+            raw_response=response_text,
+        )
 
     # --- Add step identification fields to the decoded result ---
     decoded_data["step_name"]     = step_name

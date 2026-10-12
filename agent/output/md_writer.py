@@ -42,6 +42,7 @@ import os
 # datetime — built into Python.
 # Used to: add a generation timestamp to the document header.
 from datetime import datetime
+from agent.output.diagram_generator import get_step_files
 
 
 # =============================================================================
@@ -266,8 +267,7 @@ def write_decoded_step_section(step_data, validation_map, pyspark_folder):
     key_fields   = decoded.get("key_fields", [])
     operations   = decoded.get("operations", [])
     notes        = decoded.get("notes", "")
-    input_files  = decoded.get("input_files", [])
-    output_files = decoded.get("output_files", [])
+    input_files, output_files = get_step_files(decoded, step_data.get("original", {}))
 
     validation   = get_validation_result_for_step(step_name, validation_map)
     val_status   = validation.get("validation_status", "Not run")
@@ -407,8 +407,7 @@ def write_copy_step_section(step_data):
     decoded      = step_data["decoded"]
     step_name    = decoded.get("step_name", "UNKNOWN")
     business_rule = decoded.get("business_rule", "")
-    input_files  = decoded.get("input_files", [])
-    output_files = decoded.get("output_files", [])
+    input_files, output_files = get_step_files(decoded, step_data.get("original", {}))
     notes        = decoded.get("notes", "")
 
     lines = [
@@ -418,7 +417,7 @@ def write_copy_step_section(step_data):
         f"|-------|-------|",
         f"| Program | `IEBGENER` |",
         f"| SYSIN | `DD DUMMY` (no control cards) |",
-        f"| Validation | {ICON_PASS} PASS (hardcoded) |",
+        f"| Validation | {ICON_SKIP} Not run (copy action documented) |",
         f"",
         f"### Business Rule",
         f"",

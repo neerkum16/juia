@@ -13,7 +13,7 @@ are ignored by every existing COBOL migration tool. A JCL job with 25 steps
 might have 18 utility steps and 4 COBOL steps. The industry migrates the 4
 COBOL steps and leaves the 18 utility steps as undocumented tribal knowledge.
 
-JUIA reads a JCL job, decodes every utility step, and produces:
+JUIA reads a JCL job, attempts to decode supported utility steps, and produces:
 
 - Plain English business rule for each step
 - Data lineage diagram showing file flow across all steps
@@ -31,9 +31,9 @@ JUIA reads a JCL job, decodes every utility step, and produces:
 | Embeddings | `sentence-transformers` — `all-MiniLM-L6-v2` (local CPU) |
 | PDF Processing | `pypdf` |
 | Session Memory | SQLite (built into Python) |
-| API Framework | FastAPI |
+| API Framework | FastAPI planned for Phase 8; not installed yet |
 | Language | Python 3.x |
-| Environment | Local Windows machine, Git Bash, venv |
+| Environment | Windows PowerShell or Linux/Codespaces, venv |
 
 ---
 
@@ -54,21 +54,25 @@ juia/
 │   └── run_all_jcl.ps1
 ├── tests/                        # Automated regression tests
 ├── jcl/
-│   └── TEST.jcl    # Stable nine-step demo/test input
+│   ├── DATE.jcl
+│   ├── IFTRAIL.jcl
+│   └── TEST.jcl                # Stable nine-step demo/test input
 ├── cntl/                         # External SYSIN members for the sample
 ├── corpus/
 │   ├── raw/                      # Source manuals
 │   ├── extracted/                # Focused PDFs for corpus ingestion
 │   ├── synthetic/                # Annotated patterns for ingestion
 │   └── vectordb/                 # Generated locally; ignored by Git
-├── deployment/                   # Production shipping layout guide
 ├── outputs/                      # Per-run results and SQLite run index
 ├── requirements.txt
 └── README.md
 ```
 
-The front end has not been created. See [deployment/README.md](deployment/README.md)
-for the files needed in a production installation.
+The front end has not been created. A backend installation needs `agent/`,
+`requirements.txt`, the input JCL and CNTL files, an ingested local
+`corpus/vectordb/`, a writable output directory, and `ANTHROPIC_API_KEY` in the
+runtime environment. Generated PySpark requires a separately configured Spark
+runtime and input/output storage before execution.
 
 ---
 
@@ -153,9 +157,12 @@ Key settings at the top of the script:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `RESET_DATABASE` | `True` | Delete and rebuild from scratch |
+| `RESET_DATABASE` | `False` | Keep the existing collection; use `--reset` for an explicit rebuild |
 | `CHUNK_SIZE` | `1000` | Characters per chunk |
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks |
+
+Use `python scripts/ingest_corpus.py --reset` only when the existing collection
+must be rebuilt. That option deletes the current collection before ingesting it.
 
 ### Step 3 — Verify retrieval quality
 
@@ -184,17 +191,25 @@ Each invocation writes to `outputs/<job_name>/<run_id>/`, including generated
 PySpark files, decoded and validation JSON, a Mermaid diagram, and a migration
 specification. Each run also has a `result.json`, including runs that fail
 before generation. The SQLite index at `outputs/sessions.db` stores the same
-structured result. Run folders and the SQLite index are not Git-ignored, so
-they can be committed together. To retrieve a completed or failed run:
+structured result. Run folders can be committed, but the mutable SQLite index
+is Git-ignored. To retrieve a completed, incomplete, or failed run:
 
 ```bash
 python -m agent.main --get-run RUN_ID --output-folder outputs
 ```
 
+If the local SQLite index is missing, retrieval searches committed run folders
+for the matching `result.json`. The generated PySpark files are conversion
+artifacts for review. A run's validation status does not establish that the
+scripts execute together against a configured Spark and Delta environment.
+The result records `runtime_verified: false` and
+`validation_method: model_review_and_static_checks` until a separate Spark run
+has verified behavior against representative data.
+
 To convert a folder of JCL files sequentially, use the platform wrapper.
 Both wrappers scan recursively for `.jcl` files, continue after a failed or
 incomplete job, and exit nonzero if any job did not succeed. They default to
-`jcl/` when that folder exists, otherwise `jcl/`. Each job still gets
+`jcl/`. Each job still gets
 its own run folder; batch console logs and a summary are written under
 `outputs/batch_logs/<batch-id>/` by default.
 
@@ -212,11 +227,11 @@ An explicit JCL folder is optional when using either default folder. CNTL
 members are resolved from the single CNTL folder as each JCL is processed;
 they do not need separate invocations.
 
-### Why the wire payment sample is used in tests
+### Why the TEST.jcl sample is used in tests
 
 `jcl/TEST.jcl` is a fixed regression input. The automated
 tests assert its nine named steps, dataset lineage, generated-step counts, and
-`WIREPAY` job identity; `tests/sample_steps.py` builds mocked decoder results
+`MYTEST` job identity; `tests/sample_steps.py` builds mocked decoder results
 from that JCL and the sample members in `cntl/`. This gives the tests a known
 expected result without requiring an API key, vector database, or a manually
 created decoded JSON fixture. The five older `scripts/test_*.py` phase drivers
@@ -228,16 +243,28 @@ removing the sample requires updating the phase drivers and the tests that
 refer to it; adding a new production JCL does not require a new test script.
 
 The result status is `success`, `incomplete`, or `failed`. An unresolved
-external SYSIN marks the run incomplete; setup, decode, generation, or
-validation errors mark it failed. A step still failing validation after all
-three correction attempts is marked `REVIEW` and listed in `review_steps`;
-the run is `success` if no other errors or incomplete steps remain. Such a
-script still requires human review before use. Each run owns its final scripts
-and validation report; the correction loop does not create source backups or
-`.validated` markers. Validation is a Claude review of generated code, not
-execution of that code in Spark. The older `scripts/test_*.py` phase drivers
-write to shared sample paths under `outputs/`; use `python -m agent.main` for
-new job runs.
+external SYSIN or a PROGRAM/dummy IEBGENER step that remains a manual migration
+task marks the run incomplete; setup, decode, generation, or validation errors
+mark it failed. Inspect `manual_steps` and each entry in `steps` to see what
+still needs implementation. A step still failing validation after all three
+correction attempts is marked `REVIEW` and listed in `review_steps`; the run
+is `success` only when no other errors or incomplete steps remain. Such a
+script still requires human review before use. Each run owns its generated
+scripts and validation report; the main correction loop does not create source
+backups or `.validated` markers. Validation is a Claude and static review of
+generated code, not execution in Spark. The older `scripts/test_*.py` phase
+drivers write to shared sample paths under `outputs/`; use `python -m agent.main`
+for new job runs.
+
+The `cross_step_validation` field checks explicit generated path and primary
+key contracts for datasets shared between steps. It also flags known
+placeholder paths and two recognizable semantic hazards. Conflicting
+explicit contracts fail the run; relationships that cannot be checked from
+static source leave the run incomplete. The same cross-step report is saved in
+`validation.json`; recognized single-step hazards are also sent to the
+correction loop even if the model review says PASS. Dynamic storage mappings,
+full DataFrame schemas, and real input/output behavior still require a configured
+Spark integration test.
 
 ---
 
@@ -308,11 +335,11 @@ all steps passed validation.
 
 ## Sample Run Output
 
-For `jcl/TEST.jcl`, the JOB name is `WIREPAY`. The
+For `jcl/TEST.jcl`, the JOB name is `MYTEST`. The
 orchestrator creates a fresh run folder each time:
 
 ```text
-outputs/WIREPAY/<run_id>/
+outputs/MYTEST/<run_id>/
 ├── result.json
 ├── decoded.json
 ├── validation.json
@@ -327,14 +354,16 @@ outputs/WIREPAY/<run_id>/
     └── STEP090_IDCAMS.py
 ```
 
-`outputs/sessions.db` indexes run results. The shared files in `outputs/`
+The local `outputs/sessions.db` indexes run results and is not committed. The
+shared files in `outputs/`
 and `outputs/pyspark/` are from the older phase drivers. Automated tests
 build mocked decoder responses from the current sample JCL, so those shared
 files are not needed for the Phase 7 workflow or its test suite. A fresh
 conversion creates a new run ID and new scripts. Use the run's `decoded.json`
-and `result.json` when assessing that conversion. `--get-run` resolves saved
+and `result.json` when assessing that conversion. `--get-run` can read a
+committed `result.json` when the SQLite index is absent and resolves saved
 artifact paths against the current output folder when the run is opened from
-another checkout.
+another checkout. A fresh run does not change artifacts in earlier run folders.
 
 ---
 

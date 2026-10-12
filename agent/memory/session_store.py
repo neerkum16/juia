@@ -56,24 +56,51 @@ def get_run(run_id, database_path="outputs/sessions.db"):
     files exist there, which supports a checkout copied from Codespaces.
     """
     database = Path(database_path)
-    # Looking up an unknown run must not create an empty SQLite database.
-    if not database.is_file():
-        return None
-    with closing(sqlite3.connect(database)) as connection:
-        row = connection.execute(
-            "SELECT result_json FROM runs WHERE run_id = ?", (run_id,)
-        ).fetchone()
-    if not row:
+    result = None
+    # The SQLite index is local and deliberately excluded from Git. A copied
+    # checkout may have committed run folders without their original index.
+    if database.is_file():
+        try:
+            with closing(sqlite3.connect(database)) as connection:
+                row = connection.execute(
+                    "SELECT result_json FROM runs WHERE run_id = ?", (run_id,)
+                ).fetchone()
+            if row:
+                candidate = json.loads(row[0])
+                if (isinstance(candidate, dict)
+                        and candidate.get("run_id") == run_id
+                        and isinstance(candidate.get("job_name"), str)):
+                    result = candidate
+        except (sqlite3.Error, ValueError, TypeError):
+            # A missing/corrupt local index must not hide a valid result.json.
+            pass
+    if result is None:
+        # Run IDs are generated as UUID hex strings. Validate before searching
+        # so a lookup cannot turn into an arbitrary filesystem path traversal.
+        if len(run_id) != 32 or any(c not in "0123456789abcdef" for c in run_id.lower()):
+            return None
+        for result_path in database.parent.glob(f"*/{run_id}/result.json"):
+            try:
+                candidate = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if (isinstance(candidate, dict)
+                    and candidate.get("run_id") == run_id
+                    and candidate.get("job_name") == result_path.parent.parent.name):
+                result = candidate
+                break
+    if result is None:
         return None
     # JSON restores the same nested result shape written by the orchestrator.
-    result = json.loads(row[0])
     run_folder = database.parent / result["job_name"] / result["run_id"]
 
     def local_path(stored_path, folder):
         """Prefer a matching file in this checkout over a saved absolute path."""
         # Saved results may have originated in another Codespaces checkout.
         # Only replace paths for files that actually exist in this run folder.
-        candidate = folder / Path(stored_path).name
+        # Results may move between Linux Codespaces and Windows checkouts.
+        basename = str(stored_path).replace("\\", "/").rsplit("/", 1)[-1]
+        candidate = folder / basename
         return str(candidate) if candidate.is_file() else stored_path
 
     # Rebase both top-level artifact paths and nested validation code paths;

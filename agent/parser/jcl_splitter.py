@@ -220,14 +220,16 @@ def extract_pgm_from_exec(exec_parameters):
         return pgm_match.group(1)
 
     # Search for PROC=something
-    proc_match = re.search(r'PROC=(\S+)', exec_parameters, re.IGNORECASE)
+    proc_match = re.search(r'PROC=([^,\s]+)', exec_parameters, re.IGNORECASE)
     if proc_match:
-        return f"PROC:{proc_match.group(1).rstrip(',')}"
+        return f"PROC:{proc_match.group(1)}"
 
     # If just a bare word with no = it is a proc name
     parts = exec_parameters.strip().split()
-    if parts and '=' not in parts[0]:
-        return f"PROC:{parts[0].rstrip(',')}"
+    if parts:
+        first_parameter = parts[0].split(",", 1)[0]
+        if first_parameter and '=' not in first_parameter:
+            return f"PROC:{first_parameter}"
 
     return "UNKNOWN"
 
@@ -246,7 +248,8 @@ def is_inline_sysin(parameters):
         "SYSOUT=*"                           → False (sysout)
     """
     params_clean = parameters.strip().upper()
-    return params_clean in ("*", "DATA") or params_clean.startswith("* ")
+    # DD *,DLM=xx and DD DATA,DLM=xx introduce inline records too.
+    return bool(re.match(r"^(?:\*|DATA)(?:\s*(?:,|$))", params_clean))
 
 
 def is_dummy_sysin(parameters):
@@ -269,8 +272,89 @@ def is_external_sysin(parameters):
         "*"                                   → False (inline)
         "DUMMY"                               → False (dummy)
     """
-    params_upper = parameters.strip().upper()
-    return params_upper.startswith("DSN=")
+    # JCL permits DISP before DSN; inspect every parameter, not only the first.
+    return bool(re.search(r"(?:^|,)\s*DSN\s*=", parameters, re.IGNORECASE))
+
+
+def inline_delimiter(parameters):
+    """Return a DD's optional DLM marker, or the default ``/*`` marker."""
+    match = re.search(r"(?:^|,)\s*DLM\s*=\s*([^,\s]+)", parameters, re.I)
+    return match.group(1).strip("'\"") if match else JCL_INLINE_END
+
+
+def detect_unsupported_jcl_constructs(jcl_text, job_cards=None):
+    """Identify JCL features that require expansion before safe conversion.
+
+    This is a guard, not an attempt to execute JCL. The orchestrator can use
+    these messages to mark a run incomplete instead of silently skipping work.
+    Inline data is skipped so its records are not mistaken for JCL control.
+    When supplied, ``job_cards`` receives the names of real JOB statements;
+    the orchestrator uses them for identity and multi-job validation.
+    """
+    issues = []
+    job_count = 0
+    in_inline = False
+    delimiter = JCL_INLINE_END
+    last_operation = ""
+    for raw_line in jcl_text.splitlines():
+        line = raw_line.rstrip()
+        if in_inline:
+            if is_continuation_line(line) and "DLM=" in line.upper():
+                delimiter = inline_delimiter(line[2:])
+                continue
+            if line.strip() == delimiter:
+                in_inline = False
+            elif delimiter == JCL_INLINE_END and is_jcl_statement(line):
+                in_inline = False
+            else:
+                continue
+        if not is_jcl_statement(line):
+            continue
+        if is_continuation_line(line):
+            unnamed_control = re.match(
+                r"^//\s+(IF|ELSE|ENDIF|INCLUDE|SET|JCLLIB|PROC|PEND)\b",
+                line, re.I,
+            )
+            if unnamed_control:
+                issues.append(
+                    f"Unsupported JCL {unnamed_control.group(1).upper()} statement: {line}"
+                )
+                continue
+            if last_operation == "EXEC" and re.search(r"\bCOND\s*=", line, re.I):
+                issues.append(f"Unsupported conditional EXEC: {line}")
+            if last_operation == "EXEC" and re.search(r"\bPROC\s*=", line, re.I):
+                issues.append(f"Unexpanded procedure call: {line}")
+            symbols = re.findall(r"(?<!&)&(?!&)([A-Za-z@$#][A-Za-z0-9@$#]*)", line)
+            if any(not symbol.upper().startswith("SYS") for symbol in symbols):
+                issues.append(f"Unresolved JCL symbolic parameter: {line}")
+            continue
+        name, operation, parameters = parse_jcl_statement(line)
+        op = operation.upper()
+        # Unnamed control statements put the operation in the first token.
+        if name.upper() in {"INCLUDE", "IF", "ELSE", "ENDIF", "PROC", "PEND", "SET", "JCLLIB"}:
+            op = name.upper()
+        last_operation = op
+        if op == "JOB":
+            job_count += 1
+            if job_cards is not None:
+                job_cards.append(name)
+        if op in {"INCLUDE", "IF", "ELSE", "ENDIF", "PROC", "PEND", "SET", "JCLLIB"}:
+            issues.append(f"Unsupported JCL {op} statement: {line}")
+        if op == "EXEC" and extract_pgm_from_exec(parameters).startswith("PROC:"):
+            issues.append(f"Unexpanded procedure call: {line}")
+        if op == "EXEC" and re.search(r"\bCOND\s*=", parameters, re.I):
+            issues.append(f"Unsupported conditional EXEC: {line}")
+        # A single ampersand denotes a symbolic parameter; doubled
+        # ampersands denote temporary datasets and remain supported.
+        symbols = re.findall(r"(?<!&)&(?!&)([A-Za-z@$#][A-Za-z0-9@$#]*)", line)
+        if any(not symbol.upper().startswith("SYS") for symbol in symbols):
+            issues.append(f"Unresolved JCL symbolic parameter: {line}")
+        if op == "DD" and is_inline_sysin(parameters):
+            in_inline = True
+            delimiter = inline_delimiter(parameters)
+    if job_count > 1:
+        issues.append(f"JCL contains {job_count} JOB cards; process one job per file")
+    return issues
 
 
 # =============================================================================
@@ -329,7 +413,27 @@ def extract_member_from_dsn(dsn):
     return ""
 
 
-def find_local_cntl_file(dsn, cntl_folder):
+def _case_insensitive_file(directory, filename):
+    """Find one filename in a directory regardless of host case rules."""
+    if not directory or not os.path.isdir(directory):
+        return None
+    matches = [os.path.join(directory, entry) for entry in os.listdir(directory)
+               if entry.casefold() == filename.casefold()
+               and os.path.isfile(os.path.join(directory, entry))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _case_insensitive_directory(parent, name):
+    """Find one child directory even on a case-sensitive filesystem."""
+    if not os.path.isdir(parent):
+        return None
+    matches = [os.path.join(parent, entry) for entry in os.listdir(parent)
+               if entry.casefold() == name.casefold()
+               and os.path.isdir(os.path.join(parent, entry))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def find_local_cntl_file(dsn, cntl_folder, allow_member_fallback=True):
     """
     Searches the local cntl/ folder for a file matching the given DSN.
 
@@ -356,41 +460,43 @@ def find_local_cntl_file(dsn, cntl_folder):
         The full path to the local file if found, or None if not found.
     """
 
-    # First try: if this is a PDS member, look for just the member name
+    # A PDS member belongs to a library. Prefer names retaining both pieces
+    # so two libraries may safely contain a member with the same name.
     member_name = extract_member_from_dsn(dsn)
-
-    if member_name:
-        # Try variations of the member name with different extensions
-        for extension in CNTL_FILE_EXTENSIONS:
-            candidate_filename  = member_name + extension
-            candidate_path      = os.path.join(cntl_folder, candidate_filename)
-
-            if os.path.exists(candidate_path):
-                return candidate_path
-
-            # Also try lowercase version of the filename
-            candidate_filename_lower = member_name.lower() + extension
-            candidate_path_lower     = os.path.join(cntl_folder,
-                                                     candidate_filename_lower)
-            if os.path.exists(candidate_path_lower):
-                return candidate_path_lower
-
-    # Second try: use the full DSN name (useful for sequential datasets)
-    # Strip the member part if present: "SYS2.CNTL(WIREEXT)" → "SYS2.CNTL"
     base_dsn = re.sub(r'\([^)]*\)', '', dsn).strip()
 
-    for extension in CNTL_FILE_EXTENSIONS:
-        candidate_filename  = base_dsn + extension
-        candidate_path      = os.path.join(cntl_folder, candidate_filename)
+    if member_name:
+        library_dir = _case_insensitive_directory(cntl_folder, base_dsn)
+        for extension in CNTL_FILE_EXTENSIONS:
+            for directory, filename in (
+                (library_dir, member_name + extension),
+                (cntl_folder, f"{base_dsn}({member_name}){extension}"),
+                (cntl_folder, f"{base_dsn}.{member_name}{extension}"),
+            ):
+                match = _case_insensitive_file(directory, filename)
+                if match:
+                    return match
+        # Existing single-library projects can retain bare member files.
+        # A caller disables this fallback when a job references the same
+        # member name from multiple PDS libraries.
+        if allow_member_fallback:
+            for extension in CNTL_FILE_EXTENSIONS:
+                match = _case_insensitive_file(cntl_folder, member_name + extension)
+                if match:
+                    return match
+        return None
 
-        if os.path.exists(candidate_path):
-            return candidate_path
+    # Sequential datasets have no member; their full DSN is the identity.
+    for extension in CNTL_FILE_EXTENSIONS:
+        match = _case_insensitive_file(cntl_folder, base_dsn + extension)
+        if match:
+            return match
 
     # Not found
     return None
 
 
-def resolve_external_sysin(dsn, cntl_folder):
+def resolve_external_sysin(dsn, cntl_folder, allow_member_fallback=True):
     """
     Attempts to read external SYSIN content from the local cntl/ folder.
 
@@ -421,14 +527,18 @@ def resolve_external_sysin(dsn, cntl_folder):
         return ("", SYSIN_SOURCE_EXTERNAL_UNRESOLVED, warning)
 
     # Search for a matching local file
-    local_file_path = find_local_cntl_file(dsn, cntl_folder)
+    local_file_path = find_local_cntl_file(
+        dsn, cntl_folder, allow_member_fallback=allow_member_fallback
+    )
 
     if local_file_path is None:
         # Provide a helpful message telling the user exactly what to do
         member_name = extract_member_from_dsn(dsn)
-        filename_hint = (member_name + ".jcl") if member_name else (dsn + ".jcl")
+        filename_hint = dsn + ".cntl"
         warning = (f"External SYSIN not resolved: '{dsn}'. "
                    f"Upload the control cards as '{cntl_folder}/{filename_hint}'.")
+        if member_name and not allow_member_fallback:
+            warning += " Bare member filenames are ambiguous across libraries."
         return ("", SYSIN_SOURCE_EXTERNAL_UNRESOLVED, warning)
 
     # Found the file — read it
@@ -483,7 +593,8 @@ def create_new_step(step_name, pgm, exec_statement_line):
         "sysin_warning"   : "",
 
         "raw_lines"       : [exec_statement_line],
-        "utility_type"    : None
+        "utility_type"    : None,
+        "unsupported_constructs": []
     }
 
 
@@ -584,22 +695,36 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
     collecting_inline  = False
     inline_buffer      = []
     inline_ddname      = ""
+    # A bare member filename cannot identify a library if this job uses the
+    # same member name in more than one PDS. Require a qualified local path.
+    member_libraries = {}
+    for dsn in re.findall(r"\bDSN\s*=\s*([^,\s]+)", jcl_text, re.I):
+        member = extract_member_from_dsn(dsn)
+        if member:
+            library = dsn.split("(", 1)[0].upper()
+            member_libraries.setdefault(member.upper(), set()).add(library)
+    ambiguous_members = {member for member, libraries in member_libraries.items()
+                         if len(libraries) > 1}
 
     for raw_line in all_lines:
 
-        # Remove trailing whitespace, preserve leading (matters in inline data)
+        # JCL statement whitespace can be trimmed, but inline records retain
+        # every character, including blanks and trailing spaces.
         line = raw_line.rstrip()
-
-        # Skip blank lines
-        if len(line.strip()) == 0:
-            continue
 
         # =============================================================
         # STATE: collecting inline data (between DD * and /*)
         # =============================================================
         if collecting_inline:
+            delimiter = inline_delimiter(current_dd["parameters"])
+            # DLM may be supplied on a continuation of DD *, before data.
+            if (not inline_buffer and is_continuation_line(line)
+                    and "DLM=" in line.upper()):
+                current_step["raw_lines"].append(line)
+                current_dd["parameters"] += " " + line[2:].strip()
+                continue
 
-            if is_inline_data_end(line):
+            if line.strip() == delimiter:
                 # /* found — end of inline data
                 finish_inline_data_collection(current_step, current_dd,
                                                inline_buffer, inline_ddname)
@@ -608,7 +733,7 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
                 inline_ddname     = ""
                 continue
 
-            elif is_jcl_statement(line) and not is_comment_line(line):
+            elif delimiter == JCL_INLINE_END and is_jcl_statement(line):
                 # New // statement — inline data ends implicitly
                 finish_inline_data_collection(current_step, current_dd,
                                                inline_buffer, inline_ddname)
@@ -619,8 +744,12 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
 
             else:
                 # Regular inline data line — add to buffer
-                inline_buffer.append(line)
+                inline_buffer.append(raw_line)
                 continue
+
+        # Blank lines outside an inline DD carry no program input.
+        if len(line.strip()) == 0:
+            continue
 
         # =============================================================
         # Skip comment lines
@@ -641,13 +770,40 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
         # =============================================================
         if is_jcl_statement(line):
 
-            # Continuation line — append to current DD parameters
+            # Continuation line — append to the current DD or EXEC statement.
             if is_continuation_line(line):
                 if current_step is not None:
                     current_step["raw_lines"].append(line)
+                    continuation = line[2:].strip()
                     if current_dd is not None:
-                        continuation = line[2:].strip()
                         current_dd["parameters"] += " " + continuation
+                        ddname = current_dd["ddname"].upper()
+                        is_control = ddname == "SYSIN" or (
+                            ddname == "TOOLIN"
+                            and current_step.get("pgm", "").upper() == "ICETOOL"
+                        )
+                        # A DSN or inline marker may appear after DISP on a
+                        # continuation. Resolve it once the value is present.
+                        if is_control and is_external_sysin(current_dd["parameters"]):
+                            dsn = extract_dsn_from_parameters(current_dd["parameters"])
+                            member = extract_member_from_dsn(dsn).upper()
+                            content, source, warning = resolve_external_sysin(
+                                dsn, cntl_folder,
+                                allow_member_fallback=member not in ambiguous_members
+                            )
+                            current_step.update(sysin_dsn=dsn, sysin_content=content,
+                                                sysin_source=source, sysin_warning=warning)
+                            if source == SYSIN_SOURCE_EXTERNAL_RESOLVED:
+                                current_dd["inline_content"] = content
+                    else:
+                        current_step["exec_statement"] += " " + continuation
+                        current_step["pgm"] = extract_pgm_from_exec(
+                            current_step["exec_statement"]
+                        )
+                        if current_step["pgm"].startswith("PROC:"):
+                            message = f"Unexpanded procedure call in {current_step['step_name']}"
+                            if message not in current_step["unsupported_constructs"]:
+                                current_step["unsupported_constructs"].append(message)
                 continue
 
             # Parse into name, operation, parameters
@@ -677,6 +833,10 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
 
                 pgm_name     = extract_pgm_from_exec(parameters)
                 current_step = create_new_step(name, pgm_name, line)
+                if pgm_name.startswith("PROC:"):
+                    current_step["unsupported_constructs"].append(
+                        f"Unexpanded procedure call in {name}: {line}"
+                    )
                 current_dd   = None
 
             # ---------------------------------------------------------
@@ -697,26 +857,29 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
                     ddname_upper == "TOOLIN"
                     and current_step.get("pgm", "").upper() == "ICETOOL"
                 )
+                if is_inline_sysin(parameters):
+                    # DD * can hold input data (for example SORTIN), not only
+                    # utility control cards. Preserve it on its DD entry.
+                    new_dd["is_inline"] = True
+                    collecting_inline = True
+                    inline_buffer = []
+                    inline_ddname = name
+
                 if is_control_dd:
 
                     if is_dummy_sysin(parameters):
                         # DD DUMMY — no content, mark as dummy
                         current_step["sysin_source"] = SYSIN_SOURCE_DUMMY
 
-                    elif is_inline_sysin(parameters):
-                        # DD * — collect following lines as inline content
-                        new_dd["is_inline"]  = True
-                        collecting_inline    = True
-                        inline_buffer        = []
-                        inline_ddname        = name
-
                     elif is_external_sysin(parameters):
                         # DD DSN=... — resolve from local cntl/ folder
                         dsn = extract_dsn_from_parameters(parameters)
                         current_step["sysin_dsn"] = dsn
 
+                        member = extract_member_from_dsn(dsn).upper()
                         content, source, warning = resolve_external_sysin(
-                            dsn, cntl_folder
+                            dsn, cntl_folder,
+                            allow_member_fallback=member not in ambiguous_members
                         )
 
                         current_step["sysin_content"] = content
@@ -734,7 +897,7 @@ def split_jcl_into_steps(jcl_text, cntl_folder=None):
 
     # End of file — save last step
     if current_step is not None:
-        if collecting_inline and inline_buffer:
+        if collecting_inline:
             finish_inline_data_collection(current_step, current_dd,
                                            inline_buffer, inline_ddname)
         completed_steps.append(current_step)

@@ -11,9 +11,7 @@
 #      a. Runs initial validation via Claude
 #      b. If FAIL: runs self-correction loop (up to 3 retries)
 #      c. Saves the final validation status
-#   4. Merges this run's results into outputs/validation_report.json
-#      (results from previous runs are preserved; same step name is
-#      overwritten by the newest result)
+#   4. Replaces outputs/validation_report.json with this invocation's results
 #   5. Prints a summary table for this run
 #
 # HOW TO RUN:
@@ -26,8 +24,7 @@
 #   Any FAIL triggers automatic correction and re-validation.
 #
 # OUTPUT FILES:
-#   outputs/validation_report.json   — accumulated validation results per step
-#   outputs/pyspark/*.validated      — marker written after a PASS
+#   outputs/validation_report.json   — validation results from this invocation
 # =============================================================================
 
 
@@ -259,11 +256,11 @@ def print_summary_table(all_results):
 
 def merge_with_existing_report(new_results, report_path):
     """
-    Merges this run's results into any existing report on disk.
+    Returns only this invocation's results in a stable order.
 
-    Results from previous runs are preserved. If a step appears in both
-    the existing report and the new results, the new result replaces it.
-    The merged list is sorted by step name for a stable report layout.
+    The old phase driver merged older reports by step name. That could make a
+    new validation appear complete when a script was absent from this run.
+    The argument is kept for compatibility with callers of this helper.
 
     Parameters:
         new_results : list of validation result dicts from this run
@@ -273,36 +270,15 @@ def merge_with_existing_report(new_results, report_path):
         The merged list of validation result dicts.
     """
 
-    merged = {}
-
-    if os.path.exists(report_path):
-        try:
-            with open(report_path, encoding="utf-8") as f:
-                existing_data = json.load(f)
-            for step in existing_data.get("steps", []):
-                name = step.get("step_name", "")
-                if name:
-                    merged[name] = step
-        except Exception as error:
-            print(f"  [WARN] Could not read existing report "
-                  f"({error}) — starting a new one")
-
-    # New results overwrite existing results for the same step name
-    for result in new_results:
-        name = result.get("step_name", "")
-        if name:
-            merged[name] = result
-
-    return [merged[name] for name in sorted(merged)]
+    return sorted(new_results, key=lambda result: result.get("step_name", ""))
 
 
 def save_validation_report(all_results, report_path):
     """
     Saves the validation results to a JSON report file.
 
-    Results are merged with any existing report so the report accumulates
-    across runs. This keeps the report in sync with the .validated marker
-    files, which cause already-passed steps to be skipped on later runs.
+    The report covers this invocation only. Prior validation results must not
+    be reused as proof that a freshly generated script was checked.
 
     Parameters:
         all_results : list of validation result dicts from this run
@@ -311,7 +287,7 @@ def save_validation_report(all_results, report_path):
 
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
 
-    # Merge BEFORE computing totals so the counts cover the whole report
+    # Keep one report per invocation; an existing file is replaced below.
     merged_results = merge_with_existing_report(all_results, report_path)
 
     pass_count  = sum(1 for r in merged_results if r.get("validation_status") == "PASS")
@@ -404,14 +380,6 @@ def main():
             print(f"  [WARN] No original step found for {step_name} — using empty")
             original_step = {"sysin_content": "", "dd_statements": []}
 
-        # Skip files that already passed a previous validation run.
-        # A .validated marker file is written next to the .py file
-        # after a successful PASS. Delete the marker to force re-validation.
-        marker_path = code_path.replace(".py", ".validated")
-        if os.path.exists(marker_path):
-            print(f"  Already validated — skipping ({filename})")
-            continue
-
         # Run validation + correction loop
         result = run_correction_loop(
             decoded_step  = decoded_step,
@@ -421,13 +389,6 @@ def main():
         )
 
         all_results.append(result)
-
-        # Write a .validated marker so this file is skipped on the next run
-        if result.get("validation_status") == "PASS":
-            marker_path = code_path.replace(".py", ".validated")
-            with open(marker_path, "w") as f:
-                f.write("PASS")
-            print(f"  Marker written: {os.path.basename(marker_path)}")
 
         # Show result inline
         print_validation_result(result, index, total)

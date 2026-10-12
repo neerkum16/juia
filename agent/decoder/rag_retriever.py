@@ -42,6 +42,7 @@
 # os — built into Python.
 # Used to: check if the ChromaDB folder exists before connecting.
 import os
+import re
 
 # chromadb — our local vector database.
 # Used to: connect and run similarity searches.
@@ -97,7 +98,7 @@ DFSORT_KEYWORDS   = ["INCLUDE", "OMIT", "SORT", "OUTFIL", "OUTREC",
                       "INREC", "SUM", "JOINKEYS", "MERGE", "COPY",
                       "FIELDS", "COND", "IFTHEN"]
 
-ICETOOL_KEYWORDS  = ["SELECT", "SORT", "COPY", "STATS", "SPLICE",
+ICETOOL_KEYWORDS  = ["RESIZE", "TOLEN", "SELECT", "SORT", "COPY", "STATS", "SPLICE",
                       "UNIQUE", "DISPLAY", "COUNT", "RANGE", "OCCUR",
                       "FROM", "USING", "ON", "FIRST", "LAST"]
 
@@ -163,7 +164,7 @@ def build_rag_query(utility_type, sysin_content):
     found_so_far = []
 
     for keyword in keywords_to_look_for:
-        if keyword.upper() in sysin_upper:
+        if re.search(rf"\b{re.escape(keyword.upper())}\b", sysin_upper):
             found_so_far.append(keyword)
 
         # Stop after finding 4 keywords — enough for a focused query

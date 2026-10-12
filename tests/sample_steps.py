@@ -5,7 +5,6 @@ This helper derives them from TEST.jcl each time rather than maintaining a
 second, manually edited decoded JSON fixture.
 """
 
-import re
 from pathlib import Path
 
 from agent.output.diagram_generator import extract_files_from_dd
@@ -22,8 +21,9 @@ CNTL = ROOT / "cntl"
 def build_sample_steps():
     """Return parsed steps and minimal decoded responses for mocked API tests.
 
-    The IDCAMS names come from its control cards; DD names come from the
-    existing DD extractor. No saved output or manually maintained JSON is used.
+    DD names come from the existing DD extractor. IDCAMS names deliberately
+    remain absent so tests exercise production SYSIN extraction instead.
+    No saved output or manually maintained JSON is used.
     """
     # Use the same parser and classifier as production. CNTL points at the
     # real members referenced by the sample's external control cards.
@@ -32,15 +32,10 @@ def build_sample_steps():
     ))
     decoded = []
     for step in original:
-        # DD statements supply normal dataset edges. IDCAMS can name datasets
-        # inside SYSIN instead, so extract those operations as well.
+        # DD statements supply normal edges; production output code recovers
+        # IDCAMS SYSIN datasets without fixture assistance.
         inputs, outputs = extract_files_from_dd(step)
         sysin = step.get("sysin_content", "")
-        if step["utility_type"] == "IDCAMS":
-            outputs.extend(re.findall(
-                r"DEFINE\s+CLUSTER[\s-]*\(NAME\(([^)]+)\)", sysin, re.I
-            ))
-            inputs.extend(re.findall(r"LISTCAT\s+ENTRIES\(([^)]+)\)", sysin, re.I))
         skipped = step["utility_type"] == "PROGRAM" or step["sysin_source"] == "dummy"
         # Keep only the fields consumed by the orchestration and output tests;
         # no API-generated business interpretation is being asserted here.

@@ -49,6 +49,7 @@
 # os — built into Python, no install needed.
 # Used to: check if files/folders exist, list directory contents,
 #          build file paths that work on both Windows and Linux.
+import argparse
 import os
 
 # time — built into Python, no install needed.
@@ -118,11 +119,9 @@ CHUNK_OVERLAP = 200
 BATCH_SIZE = 50
 
 # --- Reset flag ---
-# If True  : delete the existing ChromaDB collection and start completely fresh.
-#            Use this if you want to rebuild the database from scratch.
-# If False : skip any file that has already been ingested (checks metadata).
-#            Use this if you are adding new files to an existing database.
-RESET_DATABASE = True
+# Existing collections are preserved by default. Pass --reset explicitly when
+# source material changes and the stored chunks need to be rebuilt.
+RESET_DATABASE = False
 
 # --- Map each PDF filename to a short identifying name ---
 # This short name is stored as metadata with every chunk so we can later
@@ -629,7 +628,7 @@ def get_already_ingested_sources(collection):
 # Orchestrates the entire ingestion process.
 # =============================================================================
 
-def main():
+def main(reset_database=RESET_DATABASE):
     """
     Main function — runs the complete corpus ingestion pipeline.
 
@@ -681,7 +680,7 @@ def main():
     # -------------------------------------------------------------------------
     print(f"\n[3/5] Setting up collection : '{COLLECTION_NAME}'")
 
-    if RESET_DATABASE:
+    if reset_database:
         # Delete the collection if it exists, then create it fresh.
         # try/except catches the error if the collection doesn't exist yet.
         try:
@@ -820,4 +819,10 @@ def main():
 # ensures the code only executes when intended.
 # =============================================================================
 if __name__ == "__main__":
-    main()
+    argument_parser = argparse.ArgumentParser(description="Ingest the JUIA reference corpus")
+    argument_parser.add_argument(
+        "--reset", action="store_true",
+        help="Delete and rebuild the existing ChromaDB collection explicitly",
+    )
+    arguments = argument_parser.parse_args()
+    main(reset_database=arguments.reset)

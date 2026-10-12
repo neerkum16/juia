@@ -98,7 +98,8 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(diagram.count(" --> "), 20)
             stored = get_run(result["run_id"], Path(temp) / "outputs/sessions.db")
             # SQLite and result.json must expose the same run contract.
-            self.assertEqual(stored["status"], "success")
+            self.assertEqual(stored["status"], "incomplete")
+            self.assertEqual(stored["manual_steps"], ["STEP050", "STEP060", "STEP080"])
             self.assertEqual(stored["artifacts"], result["artifacts"])
             self.assertEqual(
                 json.loads(Path(result["artifacts"]["result"]).read_text(encoding="utf-8")),
@@ -291,7 +292,9 @@ class OrchestratorTests(unittest.TestCase):
                 generator=generate,
                 validator=validate,
             )
-            self.assertEqual(result["status"], "success")
+            # The sample still has three unimplemented steps, so REVIEW does
+            # not turn the whole nine-step job into a complete conversion.
+            self.assertEqual(result["status"], "incomplete")
             self.assertEqual(result["review_steps"], ["STEP070"])
             self.assertTrue(result["review_required"])
             self.assertEqual(result["errors"], [])
@@ -336,7 +339,7 @@ class OrchestratorTests(unittest.TestCase):
             # Both external SORT cards are missing in the temporary CNTL
             # folder, and neither may be counted as a successful conversion.
             self.assertEqual(result["status"], "incomplete")
-            self.assertEqual(len(result["warnings"]), 2)
+            self.assertGreaterEqual(len(result["warnings"]), 5)
             self.assertTrue(any("STEP030" in warning for warning in result["warnings"]))
             self.assertTrue(any("STEP040" in warning for warning in result["warnings"]))
             spec = Path(result["artifacts"]["spec"]).read_text(encoding="utf-8")

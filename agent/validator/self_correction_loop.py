@@ -40,7 +40,12 @@
 # SECTION 1 — IMPORTS
 # =============================================================================
 
+import os
 import re
+import tempfile
+import time
+
+from agent.validator.python_static_checks import check_python_source
 
 from agent.validator.code_validator import (
     validate_generated_code,
@@ -195,6 +200,9 @@ def request_correction(decoded_step, original_step, current_code,
             max_tokens = 16000,   # Same as generation — corrected code is full file
             messages   = [{"role": "user", "content": prompt}]
         )
+        if getattr(message, "stop_reason", None) == "max_tokens":
+            print("  [ERROR] Correction response reached the token limit.")
+            return None
         response_text = message.content[0].text
 
         # Strip markdown fences if present
@@ -227,10 +235,32 @@ def save_corrected_code(code, code_path):
         True on success, False on failure.
     """
 
+    source_error = check_python_source(code)
+    if source_error:
+        print(f"  [ERROR] Corrected code failed static check: {source_error}")
+        return False
+
+    temporary_path = None
     try:
-        # Write corrected code
-        with open(code_path, "w", encoding="utf-8") as f:
-            f.write(code)
+        # A temporary file in the same directory keeps the prior version
+        # intact until the complete correction has been written and closed.
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".correction-", suffix=".tmp",
+            dir=os.path.dirname(os.path.abspath(code_path)),
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(code)
+        # Windows indexing or antivirus may briefly hold the just-closed
+        # temporary file. Retry only that transient permission condition.
+        for retry in range(5):
+            try:
+                os.replace(temporary_path, code_path)
+                break
+            except PermissionError:
+                if retry == 4:
+                    raise
+                time.sleep(0.05)
+        temporary_path = None
 
         print(f"  Corrected code saved: {code_path}")
         return True
@@ -238,6 +268,13 @@ def save_corrected_code(code, code_path):
     except Exception as error:
         print(f"  [ERROR] Could not save corrected code: {error}")
         return False
+
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
 
 
 # =============================================================================
@@ -340,6 +377,9 @@ def run_correction_loop(decoded_step, original_step,
 
         if corrected_code is None:
             print(f"  [ERROR] Correction request failed — stopping loop")
+            validation_result.setdefault("issues_found", []).append(
+                "Correction request failed or returned a truncated response"
+            )
             break
 
         if not corrected_code.strip():
@@ -350,6 +390,9 @@ def run_correction_loop(decoded_step, original_step,
         saved = save_corrected_code(corrected_code, code_path)
         if not saved:
             print(f"  [ERROR] Could not save correction — stopping loop")
+            validation_result.setdefault("issues_found", []).append(
+                "Corrected code failed a static check or could not be saved"
+            )
             break
 
         corrections_applied += 1
@@ -374,6 +417,10 @@ def run_correction_loop(decoded_step, original_step,
         # Update the attempt record with the result
         attempt_record["status_after"] = validation_result.get("validation_status")
         attempt_record["issues_after"] = validation_result.get("issues_found", [])
+
+        if validation_result.get("validate_status") == "error":
+            print("  [ERROR] Re-validation failed — stopping correction loop")
+            break
 
         if validation_result.get("validation_status") == STATUS_PASS:
             print(f"  Validation PASSED after {attempt} correction(s)")

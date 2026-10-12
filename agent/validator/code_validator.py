@@ -67,6 +67,9 @@ import re
 import ast
 import json
 
+from agent.output.cross_step_contract import check_step_source_contract
+from agent.validator.python_static_checks import check_python_source
+
 
 # =============================================================================
 # SECTION 2 — CONFIGURATION
@@ -94,6 +97,12 @@ VALIDATE_ERROR = "error"
 # Keys used to recognise the validation report among any dicts found in the
 # response text. A candidate must contain at least one of these.
 REPORT_MARKER_KEYS = ("overall_status", "checks", "issues_found")
+
+# A status without all seven requested checks is not evidence of a review.
+REQUIRED_CHECKS = (
+    "filter_logic", "sort_logic", "column_names", "pd_handling",
+    "output_structure", "split_logic", "aggregation",
+)
 
 
 # =============================================================================
@@ -225,6 +234,13 @@ Check that non-key fields retained from a group have an explicit selection
 rule, and do not accept unsupported claims of original input ordering.
 For OUTREC with fixed LRECL, check field order, widths, overflow handling,
 and the final record length.
+For IDCAMS IF LASTCC or MAXCC, compare the generated exception handling and
+operation order to the exact control cards. Broadly suppressing DELETE/DROP
+errors does not establish the requested condition-code behavior.
+Check that referenced Python names have imports or definitions. State the
+input/output schema and path assumptions needed to connect this step to
+adjacent steps. If their code is not supplied, do not claim they were matched.
+State when example paths still need configuration; do not call them runnable.
 
 STEP C — PRODUCE VALIDATION REPORT (this is your entire response)
 Return ONLY a valid JSON object (no markdown, no explanation).
@@ -410,6 +426,40 @@ def parse_validation_response(response_text):
 # SECTION 6 — RESULT BUILDER
 # =============================================================================
 
+def validate_report_shape(report):
+    """Describe missing or mistyped model fields; return empty if complete."""
+
+    if not isinstance(report, dict):
+        return "response must be a JSON object"
+    if report.get("overall_status") not in (STATUS_PASS, STATUS_FAIL):
+        return "overall_status must be PASS or FAIL"
+    checks = report.get("checks")
+    if not isinstance(checks, dict):
+        return "checks must be an object"
+    for name in REQUIRED_CHECKS:
+        check = checks.get(name)
+        if not isinstance(check, dict):
+            return f"missing {name} check"
+        allowed = (STATUS_PASS, STATUS_FAIL) if name in (
+            "column_names", "output_structure"
+        ) else (STATUS_PASS, STATUS_FAIL, STATUS_NA)
+        if check.get("status") not in allowed:
+            return f"{name}.status must be one of {', '.join(allowed)}"
+        if not isinstance(check.get("detail"), str) or not check["detail"].strip():
+            return f"{name}.detail must explain the check"
+    if not isinstance(report.get("issues_found"), list) or any(
+        not isinstance(issue, str) for issue in report["issues_found"]
+    ):
+        return "issues_found must be a list of strings"
+    if not isinstance(report.get("correction_needed"), bool):
+        return "correction_needed must be a boolean"
+    if not isinstance(report.get("correction_hint"), str):
+        return "correction_hint must be a string"
+    if not isinstance(report.get("synthetic_data_summary"), str):
+        return "synthetic_data_summary must be a string"
+    return ""
+
+
 def build_validation_result(step_name, utility_type, code_path,
                              parsed_response):
     """
@@ -428,9 +478,12 @@ def build_validation_result(step_name, utility_type, code_path,
         A complete validation result dictionary.
     """
 
-    checks = parsed_response.get("checks", {})
-    if not isinstance(checks, dict):
-        checks = {}
+    report_error = validate_report_shape(parsed_response)
+    if report_error:
+        return build_error_result(step_name, utility_type, code_path,
+                                  f"Incomplete validation report: {report_error}")
+
+    checks = parsed_response["checks"]
     failed_check = any(
         isinstance(check, dict) and check.get("status") == STATUS_FAIL
         for check in checks.values()
@@ -531,6 +584,15 @@ def validate_generated_code(decoded_step, original_step,
             f"Generated file not found or empty: {code_path}"
         )
 
+    source_error = check_python_source(generated_code)
+    if source_error:
+        return build_error_result(step_name, utility_type, code_path,
+                                  f"Generated Python failed static check: {source_error}")
+    # These source-only checks target failure patterns that a fluent model
+    # review previously called PASS. Keep them through model validation so
+    # the correction loop receives concrete issues and can repair the file.
+    static_contract_issues = check_step_source_contract(original_step, generated_code)
+
     # Step 2: Build the validation prompt
     prompt = build_validation_prompt(decoded_step, original_step, generated_code)
 
@@ -544,10 +606,12 @@ def validate_generated_code(decoded_step, original_step,
         )
         response_text = message.content[0].text
 
-        # A response cut off at max_tokens leaves unbalanced JSON
+        # Even a parseable prefix may omit later checks or observations.
         if getattr(message, "stop_reason", None) == "max_tokens":
-            print(f"  [WARN] Response truncated at {MAX_TOKENS} tokens "
-                  f"for {step_name}; JSON may be incomplete")
+            return build_error_result(
+                step_name, utility_type, code_path,
+                f"Validation response truncated at {MAX_TOKENS} tokens for {step_name}"
+            )
 
     except Exception as error:
         print(f"  [ERROR] API call failed: {error}")
@@ -566,6 +630,16 @@ def validate_generated_code(decoded_step, original_step,
 
     # Step 5: Build and return the result
     result = build_validation_result(step_name, utility_type, code_path, parsed)
+    if result.get("validate_status") == VALIDATE_OK and static_contract_issues:
+        static_messages = [item["message"] for item in static_contract_issues]
+        result["issues_found"].extend(static_messages)
+        result["correction_needed"] = True
+        result["validation_status"] = STATUS_FAIL
+        existing_hint = result.get("correction_hint", "").strip()
+        result["correction_hint"] = " ".join(filter(None, (
+            existing_hint,
+            "Resolve static contract findings: " + "; ".join(static_messages),
+        )))
 
     overall = result["validation_status"]
     issues  = len(result["issues_found"])

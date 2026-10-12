@@ -220,13 +220,14 @@ def get_step_files(decoded_step, original_step):
     input_files  = list(decoded_step.get("input_files", []) or [])
     output_files = list(decoded_step.get("output_files", []) or [])
 
-    # Merge in datasets found in the DD statements (union, Phase 3 first)
+    # Merge DD datasets and IDCAMS SYSIN datasets with decoded file lists.
     if original_step:
         dd_inputs, dd_outputs = extract_files_from_dd(original_step)
-        for name in dd_inputs:
+        control_inputs, control_outputs = extract_files_from_idcams_sysin(original_step)
+        for name in dd_inputs + control_inputs:
             if name not in input_files:
                 input_files.append(name)
-        for name in dd_outputs:
+        for name in dd_outputs + control_outputs:
             if name not in output_files:
                 output_files.append(name)
 
@@ -244,6 +245,22 @@ def get_step_files(decoded_step, original_step):
     output_files = [f for f in output_files if is_dataset(f)]
 
     return input_files, output_files
+
+
+def extract_files_from_idcams_sysin(original_step):
+    """Read LISTCAT inputs and DEFINE CLUSTER outputs named only in SYSIN."""
+    if str(original_step.get("utility_type", "")).upper() != "IDCAMS":
+        return [], []
+    cards = str(original_step.get("sysin_content") or "")
+    inputs = re.findall(
+        r"\bLISTCAT\s+ENTRIES\s*\(\s*([^)\s]+)\s*\)",
+        cards, flags=re.IGNORECASE,
+    )
+    outputs = re.findall(
+        r"\bDEFINE\s+CLUSTER[\s-]*\(\s*NAME\s*\(\s*([^)\s]+)\s*\)",
+        cards, flags=re.IGNORECASE,
+    )
+    return inputs, outputs
 
 
 def read_dd_fields(dd):

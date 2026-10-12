@@ -133,7 +133,10 @@ class JclInputTests(unittest.TestCase):
                     generator=generate,
                     validator=validate,
                 )
-                self.assertEqual(result["status"], "success", result["errors"])
+                # IFTRAIL's generated interface is mocked and cannot prove
+                # its shared dataset contracts; TEST also has manual steps.
+                expected_status = "success" if filename == "DATE.jcl" else "incomplete"
+                self.assertEqual(result["status"], expected_status, result["errors"])
                 self.assertTrue(Path(result["artifacts"]["result"]).is_file())
                 runs.append(result)
 

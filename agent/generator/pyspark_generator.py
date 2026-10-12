@@ -65,6 +65,8 @@ import re
 # Used to: send the generation prompt and receive Python code back.
 import anthropic
 
+from agent.validator.python_static_checks import check_python_source
+
 
 # =============================================================================
 # SECTION 2 — CONFIGURATION
@@ -362,15 +364,11 @@ Produce a single Python file containing:
      column must be pre-decoded from PD format before this function runs
    - Use only the PySpark DataFrame API — no spark.sql() string queries
 
-5. EXAMPLE MAIN BLOCK — show how to call the function:
-   if __name__ == "__main__":
-       spark = SparkSession.builder.appName("{step_name}").getOrCreate()
-       # Load input (replace with actual data source)
-       input_df = spark.read.parquet("path/to/{(input_files[0] if input_files else 'input').lower().replace('.', '_')}")
-       result = function_name(input_df)
-       # Write output
-       result.write.mode("overwrite").parquet("path/to/output")
-       spark.stop()
+5. EXAMPLE MAIN BLOCK — show how to call the function with explicit runtime
+   input/output paths and table identifiers. Accept these as command-line
+   arguments or environment configuration, and fail clearly when required
+   values are absent. If sys.argv is used, import sys. For catalogue steps,
+   accept the relevant table identifiers and storage locations explicitly.
 
 IMPORTANT RULES:
 - Return ONLY valid Python code. No markdown, no code fences, no explanation.
@@ -387,6 +385,12 @@ IMPORTANT RULES:
   final record length against the declared output LRECL. Do not silently
   truncate an overlong field or amount.
 - Every column reference must use the COLUMN NAME CONSTANTS, not string literals.
+- Use DD dataset names as lineage identifiers. State required input and output
+  schemas so adjacent steps can be connected without guessing. Do not invent
+  a storage URI or record schema for a prior step.
+- Do not hardcode s3://bucket, /mnt/delta, or path/to/output in executable
+  reads or writes. When a record decoder or external mapping is unavailable,
+  raise a clear configuration error instead of claiming the example runs.
 - PD (packed decimal) fields need a comment: the column must hold the decoded
   integer value, not raw bytes. The PD decoding step is handled separately.
 - EBCDIC character fields that contain codes like 'PE': add a comment noting
@@ -394,6 +398,9 @@ IMPORTANT RULES:
 - If the utility type is IDCAMS and the operation is DELETE/DEFINE (no data
   movement), generate Python code using Delta Lake table operations or
   file system operations as the equivalent.
+- For IDCAMS IF LASTCC or MAXCC cards, preserve the comparison and where it
+  occurs among the operations. Do not swallow every DELETE/DROP exception as
+  a substitute for a specific condition-code rule; surface unexpected errors.
 - If the utility type is IDCAMS LISTCAT, generate a metadata verification
   function that checks table/dataset existence.
 - Make the generated code something a senior developer would be proud of."""
@@ -433,6 +440,10 @@ def call_claude_for_code(prompt, api_client):
                 }
             ]
         )
+
+        if getattr(message, "stop_reason", None) == "max_tokens":
+            print(f"  [ERROR] Code response reached the {MAX_TOKENS}-token limit.")
+            return None
 
         return message.content[0].text
 
@@ -514,7 +525,7 @@ def generate_pyspark_code(decoded_step, original_step, api_client,
     Returns:
         A tuple of (file_path, status):
             file_path : where the file was saved (or None on failure)
-            status    : "success", "api_error", or "save_error"
+            status    : "success", "api_error", "code_error", or "save_error"
     """
 
     step_name    = decoded_step.get("step_name", "UNKNOWN")
@@ -538,6 +549,11 @@ def generate_pyspark_code(decoded_step, original_step, api_client,
     if not clean_code.strip():
         print(f"  [ERROR] Empty response for {step_name}")
         return (None, "api_error")
+
+    source_error = check_python_source(clean_code)
+    if source_error:
+        print(f"  [ERROR] Generated code for {step_name} is invalid: {source_error}")
+        return (None, "code_error")
 
     # Step 4: Save to file
     file_path = save_generated_code(

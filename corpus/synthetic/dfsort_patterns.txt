@@ -315,6 +315,16 @@ MODERN EQUIV (PySpark):
 
 
 ================================================================================
+PATTERN 09A — ICETOOL RESIZE: change the record length
+
+ICETOOL TOOLIN:
+  RESIZE FROM(IN1) TO(OUT1) TOLEN(30)
+
+FROM(IN1) names the input DD and TO(OUT1) names the output DD. TOLEN(30)
+requests 30-byte output records. A migration must preserve the original
+record order and verify padding or truncation against the source record
+format before writing its output. The IFTRAIL sample uses this operator.
+
 PATTERN 10 — ICETOOL STATS: generate statistics on amount field
 ================================================================================
 

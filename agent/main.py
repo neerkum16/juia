@@ -13,9 +13,12 @@ from uuid import uuid4
 from pathlib import Path
 
 from agent.memory.session_store import get_run, save_run
+from agent.output.cross_step_contract import check_cross_step_contracts
 from agent.output.diagram_generator import generate_mermaid_diagram
 from agent.output.md_writer import assemble_migration_spec
-from agent.parser.jcl_splitter import load_jcl_from_file, split_jcl_into_steps
+from agent.parser.jcl_splitter import (
+    detect_unsupported_jcl_constructs, load_jcl_from_file, split_jcl_into_steps,
+)
 from agent.parser.sort_control_validator import validate_sort_sum_layout
 from agent.parser.utility_classifier import classify_steps
 
@@ -61,6 +64,10 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         "warnings": [],
         "review_steps": [],
         "review_required": False,
+        "manual_steps": [],
+        "validation_method": "model_review_and_static_checks",
+        "runtime_verified": False,
+        "cross_step_validation": {"status": "NOT_RUN", "issues": []},
         "validation_results": [],
         "artifacts": {},
         "code_paths": {},
@@ -81,16 +88,33 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             result["artifacts"].pop("result", None)
             result["errors"].append(f"Could not write run result: {error}")
             result["status"] = "failed"
-        # The SQLite row makes both successful and failed runs retrievable
-        # without searching through output folders.
-        save_run(result, database_path)
+        # Keep a failed SQLite write inside the result contract. The run's
+        # result.json remains usable as a lookup fallback in another checkout.
+        try:
+            save_run(result, database_path)
+        except Exception as error:
+            result["errors"].append(f"Could not index run in SQLite: {error}")
+            result["status"] = "failed"
+            if result["artifacts"].get("result"):
+                try:
+                    write_json(result_path, result)
+                except Exception as write_error:
+                    result["errors"].append(
+                        f"Could not update run result after SQLite failure: {write_error}"
+                    )
         return result
 
     try:
         # Parse the original JCL first; CNTL members are resolved by the
         # splitter, and the classifier supplies the utility type per step.
         jcl_text = load_jcl_from_file(str(source))
-        job_name = get_job_name(jcl_text, source)
+        job_cards = []
+        unsupported = detect_unsupported_jcl_constructs(jcl_text, job_cards)
+        if len(job_cards) > 1:
+            raise ValueError(
+                "This input contains multiple JOB cards; pass one JCL job per invocation"
+            )
+        job_name = job_cards[0].upper() if job_cards else source.stem.upper()
         result["job_name"] = job_name
         original_steps = classify_steps(
             split_jcl_into_steps(jcl_text, cntl_folder=str(cntl_folder))
@@ -100,23 +124,55 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         # Reject a simple, known-invalid DFSORT layout before spending API
         # calls on decoding and generation.
         validate_sort_sum_layout(original_steps)
+        unsupported.extend(
+            f"{step['step_name']}: {item}"
+            for step in original_steps
+            for item in step.get("unsupported_constructs", [])
+        )
+        if unsupported:
+            # Unsupported JCL must be visible as incomplete. Continuing with
+            # partial control flow or unresolved symbols would produce a
+            # plausible but potentially wrong migration specification.
+            result["status"] = "incomplete"
+            result["warnings"].extend(unsupported)
+            result["manual_steps"] = [step["step_name"] for step in original_steps]
+            result["step_statuses"] = [{
+                "step_name": step["step_name"],
+                "utility_type": step.get("utility_type", "UNKNOWN"),
+                "decode_status": "not_run",
+                "generation_status": "not_run",
+                "validation_status": "not_run",
+            } for step in original_steps]
+            return finish()
         # Import the API-dependent modules only for a real run. Tests inject
         # lightweight phase functions so they can verify the handoffs offline.
         if decoder_factory is None:
             from agent.decoder.step_decoder import DecoderSession
             decoder_factory = DecoderSession
-        if generator is None:
-            from agent.generator.pyspark_generator import generate_pyspark_code
-            generator = generate_pyspark_code
-        if validator is None:
-            from agent.validator.self_correction_loop import run_correction_loop
-            validator = run_correction_loop
         session = decoder_factory()
         if not session.is_ready():
             raise RuntimeError("Decoder resources are not ready")
         # Positional alignment is required because each decoded result is
         # paired with its original step for code generation and validation.
-        decoded_steps = session.decode_all_steps(original_steps)
+        if hasattr(session, "decode_step"):
+            # Decode independently so a RAG/API exception on one step cannot
+            # erase the work and statuses for every other step in the job.
+            decoded_steps = []
+            for original in original_steps:
+                try:
+                    decoded_steps.append(session.decode_step(original))
+                except Exception as error:
+                    decoded_steps.append({
+                        "step_name": original["step_name"],
+                        "utility_type": original.get("utility_type", "UNKNOWN"),
+                        "decode_status": "error",
+                        "notes": f"Decoder raised {type(error).__name__}: {error}",
+                        "input_files": [],
+                        "output_files": [],
+                    })
+        else:
+            # Older injected sessions expose only the aggregate interface.
+            decoded_steps = session.decode_all_steps(original_steps)
         if len(decoded_steps) != len(original_steps):
             raise RuntimeError("Decoder did not return one result per JCL step")
         if any(original["step_name"] != decoded.get("step_name")
@@ -124,6 +180,14 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             raise RuntimeError("Decoder step names do not match the parsed JCL")
     except Exception as error:
         result["errors"].append(f"Setup or decoding failed: {error}")
+        if "original_steps" in locals() and not result["step_statuses"]:
+            result["step_statuses"] = [{
+                "step_name": step["step_name"],
+                "utility_type": step.get("utility_type", "UNKNOWN"),
+                "decode_status": "not_run",
+                "generation_status": "not_run",
+                "validation_status": "not_run",
+            } for step in original_steps]
         return finish()
 
     # Generated code and reports live below this run's unique folder.
@@ -160,6 +224,11 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
                 utility == "PROGRAM" or
                 (utility == "IEBGENER" and original.get("sysin_source") == "dummy")
             ):
+                incomplete = True
+                result["manual_steps"].append(name)
+                result["warnings"].append(
+                    f"{name}: {utility} is documented but has no generated, validated implementation"
+                )
                 continue
             # PROGRAM and dummy IEBGENER steps are intentionally skipped.
             # Other skips are gaps; API/decode errors are failures.
@@ -173,6 +242,9 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         # Reuse the existing generator and validator; their results are
         # attached to this step rather than inferred from old output files.
         try:
+            if generator is None:
+                from agent.generator.pyspark_generator import generate_pyspark_code
+                generator = generate_pyspark_code
             code_path, generation_status = generator(
                 decoded, original, session.api_client, output_folder=str(code_folder)
             )
@@ -182,8 +254,19 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
         if generation_status != "success" or not code_path:
             result["errors"].append(f"{name}: generation failed ({generation_status})")
             continue
+        generated_file = Path(code_path)
+        if (not generated_file.is_file() or
+                not generated_file.resolve().is_relative_to(code_folder.resolve())):
+            step_status["generation_status"] = "invalid_artifact"
+            result["errors"].append(
+                f"{name}: generator did not create a file in this run's PySpark folder"
+            )
+            continue
         code_paths[name] = str(code_path)
         try:
+            if validator is None:
+                from agent.validator.self_correction_loop import run_correction_loop
+                validator = run_correction_loop
             validation = validator(decoded, original, str(code_path), session.api_client)
         except Exception as error:
             validation = {
@@ -220,6 +303,24 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
     validation_map = {item["step_name"]: item for item in validation_results}
     result["validation_results"] = validation_results
     result["code_paths"] = code_paths
+    if code_paths:
+        try:
+            cross_step = check_cross_step_contracts(steps_data, code_paths)
+        except Exception as error:
+            cross_step = {"status": "ERROR", "issues": [{
+                "code": "CHECK_ERROR", "severity": "error", "dataset": "",
+                "contract": "cross_step", "steps": [],
+                "message": f"Cross-step check failed: {error}",
+            }]}
+        result["cross_step_validation"] = cross_step
+        for issue in cross_step["issues"]:
+            message = issue["message"]
+            if issue["severity"] == "error":
+                result["errors"].append(message)
+            else:
+                result["warnings"].append(message)
+        if cross_step["status"] == "UNVERIFIED":
+            incomplete = True
     # Errors outrank incomplete work; REVIEW remains a successful run with
     # review_required=True as agreed by the backend result contract.
     result["status"] = (
@@ -241,7 +342,11 @@ def run_job(jcl_path, cntl_folder="cntl", output_folder="outputs",
             "spec": output / "migration_spec.md",
         }
         write_json(paths["decoded"], {"job_name": job_name, "steps": decoded_steps})
-        write_json(paths["validation"], {"job_name": job_name, "steps": validation_results})
+        write_json(paths["validation"], {
+            "job_name": job_name,
+            "steps": validation_results,
+            "cross_step_validation": result["cross_step_validation"],
+        })
         paths["diagram"].write_text(diagram, encoding="utf-8")
         paths["spec"].write_text(spec, encoding="utf-8")
         result["artifacts"] = {key: str(path) for key, path in paths.items()}
