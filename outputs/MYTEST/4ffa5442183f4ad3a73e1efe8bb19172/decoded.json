@@ -1,0 +1,444 @@
+{
+  "job_name": "MYTEST",
+  "steps": [
+    {
+      "business_rule": "This step initialises two VSAM KSDS (Key-Sequenced Data Set) work files used in a wire transfer processing workflow. It first unconditionally attempts to delete any pre-existing versions of both clusters (WIRE.WORK.INPUT.KSDS and WIRE.WORK.EXTRT.KSDS), suppresses any condition codes from those deletes up to and including 8 (i.e. tolerates 'dataset not found' errors), and then recreates both clusters fresh with fixed 200-byte records and a 16-byte key starting at byte 1. The INPUT cluster is allocated more space (20 primary cylinders) as it receives raw wire transfer input, while the EXTRT cluster (10 primary cylinders) holds extracted/filtered records for downstream processing.",
+      "input_files": [],
+      "output_files": [
+        "WIRE.WORK.INPUT.KSDS",
+        "WIRE.WORK.EXTRT.KSDS"
+      ],
+      "key_fields": [
+        {
+          "offset": 1,
+          "length": 16,
+          "format": "CH",
+          "meaning": "Primary key for WIRE.WORK.INPUT.KSDS — a 16-byte character key starting at the first byte of each record, likely a wire transfer reference number or unique transaction identifier used for keyed access into the input staging dataset"
+        },
+        {
+          "offset": 1,
+          "length": 16,
+          "format": "CH",
+          "meaning": "Primary key for WIRE.WORK.EXTRT.KSDS — an identical 16-byte character key at byte 1, likely the same wire transfer reference number, enabling keyed retrieval from the extracted/filtered output dataset"
+        }
+      ],
+      "operations": [
+        {
+          "type": "DELETE",
+          "description": "Delete the pre-existing VSAM cluster WIRE.WORK.INPUT.KSDS (including its DATA and INDEX components) using PURGE to override any retention date. This is a hard delete — if the dataset does not exist, IDCAMS returns condition code 8, which is handled by the subsequent IF block."
+        },
+        {
+          "type": "DELETE",
+          "description": "Delete the pre-existing VSAM cluster WIRE.WORK.EXTRT.KSDS (including its DATA and INDEX components) using PURGE to override any retention date. Same tolerant-delete pattern as above."
+        },
+        {
+          "type": "FILTER",
+          "description": "Conditional code suppression: IF LASTCC > 8 THEN SET MAXCC = 0. This resets the maximum condition code to zero only if either DELETE returned a code greater than 8 (i.e. a genuine unexpected error beyond 'not found'). Codes of 0 (success) or 8 (dataset not found / already deleted) are tolerated and allow processing to continue normally. This is a standard idempotent initialisation pattern."
+        },
+        {
+          "type": "DEFINE",
+          "description": "Create VSAM KSDS cluster WIRE.WORK.INPUT.KSDS with fixed-length 200-byte records, a 16-byte key at offset 0 (byte 1), primary allocation of 20 cylinders with 5-cylinder secondary extents, and SHAREOPTIONS(2 3) allowing multiple readers with one writer within a system, and read-only sharing across systems. DATA component named WIRE.WORK.INPUT.KSDS.DATA and INDEX component named WIRE.WORK.INPUT.KSDS.INDEX."
+        },
+        {
+          "type": "DEFINE",
+          "description": "Create VSAM KSDS cluster WIRE.WORK.EXTRT.KSDS with fixed-length 200-byte records, a 16-byte key at offset 0 (byte 1), primary allocation of 10 cylinders with 5-cylinder secondary extents, and SHAREOPTIONS(2 3). DATA component named WIRE.WORK.EXTRT.KSDS.DATA and INDEX component named WIRE.WORK.EXTRT.KSDS.INDEX. Smaller primary allocation reflects that this holds a subset of the input data."
+        }
+      ],
+      "pyspark_hint": "# No Spark logic here — this step is pure infrastructure setup. Modern equivalent: drop and recreate Delta tables or empty staging directories.\n# Python: spark.sql('DROP TABLE IF EXISTS wire_work_input'); spark.sql('CREATE TABLE wire_work_input (key STRING, record STRING) USING DELTA'); spark.sql('DROP TABLE IF EXISTS wire_work_extrt'); spark.sql('CREATE TABLE wire_work_extrt (key STRING, record STRING) USING DELTA')",
+      "decode_confidence": "HIGH",
+      "notes": "1. MIGRATION PATTERN: This is a classic DELETE-then-DEFINE initialisation step. On modern platforms (Delta Lake, Snowflake, PostgreSQL) replace with DROP TABLE IF EXISTS followed by CREATE TABLE, or TRUNCATE if the schema is stable. 2. SHAREOPTIONS(2 3): Option 2 within a system permits multiple readers and one writer concurrently; option 3 across systems allows full sharing — this implies the datasets may be accessed by multiple concurrent jobs or regions (e.g. CICS + batch). Ensure the target platform has equivalent concurrency controls. 3. KEYS(16 0): IDCAMS key offset is zero-based, so the key occupies bytes 1–16 in 1-based terms. This is reflected in the key_fields above. 4. RECORDSIZE(200 200): Both min and max are 200, confirming truly fixed-length records — no variable-length handling needed in migration. 5. CYLINDERS(20 5) vs CYLINDERS(10 5): The INPUT file is twice the size of the EXTRT file, suggesting EXTRT holds a filtered/extracted subset of INPUT data — downstream steps likely populate INPUT first, then extract qualifying records into EXTRT. 6. PURGE on DELETE bypasses the dataset's expiry date — ensure the migrated process similarly has no retention lock on the staging tables. 7. The IF LASTCC > 8 / SET MAXCC = 0 guard means this step will not fail if run for the first time (datasets absent) — the migrated equivalent must replicate this idempotent behaviour using IF EXISTS semantics.",
+      "step_name": "STEP010",
+      "utility_type": "IDCAMS",
+      "pgm": "IDCAMS",
+      "sysin_source": "inline",
+      "sysin_dsn": "",
+      "decode_status": "success",
+      "sysin_content": "  DELETE WIRE.WORK.INPUT.KSDS  CLUSTER PURGE\n  DELETE WIRE.WORK.EXTRT.KSDS  CLUSTER PURGE\n  IF LASTCC > 8 THEN\n    SET MAXCC = 0\n  DEFINE CLUSTER                           -\n    (NAME(WIRE.WORK.INPUT.KSDS)            -\n     INDEXED                               -\n     KEYS(16 0)                            -\n     RECORDSIZE(200 200)                   -\n     CYLINDERS(20 5)                       -\n     SHAREOPTIONS(2 3))                    -\n  DATA                                     -\n    (NAME(WIRE.WORK.INPUT.KSDS.DATA))      -\n  INDEX                                    -\n    (NAME(WIRE.WORK.INPUT.KSDS.INDEX))\n  DEFINE CLUSTER                           -\n    (NAME(WIRE.WORK.EXTRT.KSDS)            -\n     INDEXED                               -\n     KEYS(16 0)                            -\n     RECORDSIZE(200 200)                   -\n     CYLINDERS(10 5)                       -\n     SHAREOPTIONS(2 3))                    -\n  DATA                                     -\n    (NAME(WIRE.WORK.EXTRT.KSDS.DATA))      -\n  INDEX                                    -\n    (NAME(WIRE.WORK.EXTRT.KSDS.INDEX))",
+      "dd_statements": [
+        {
+          "ddname": "SYSPRINT",
+          "parameters": "SYSOUT=*"
+        },
+        {
+          "ddname": "SYSIN",
+          "parameters": "*"
+        }
+      ]
+    },
+    {
+      "business_rule": "This step loads a sequential flat file containing daily wire transfer input records into a VSAM Key-Sequenced Data Set (KSDS). The REPRO command copies every record from the sequential input file (WIRE.DAILY.INPUT.SEQ) verbatim into the VSAM KSDS (WIRE.WORK.INPUT.KSDS), which organises the records in keyed order according to the KSDS key definition. This prepares the raw daily wire data for downstream processing that requires random-access or keyed retrieval via VSAM.",
+      "input_files": [
+        "WIRE.DAILY.INPUT.SEQ"
+      ],
+      "output_files": [
+        "WIRE.WORK.INPUT.KSDS"
+      ],
+      "key_fields": [],
+      "operations": [
+        {
+          "type": "LOAD",
+          "description": "IDCAMS REPRO copies all records from the sequential flat file WIRE.DAILY.INPUT.SEQ into the VSAM KSDS WIRE.WORK.INPUT.KSDS without any filtering, transformation, or selection. Records are inserted into the KSDS and automatically ordered by the KSDS primary key as defined at cluster definition time. No field-level logic is applied by this step itself."
+        }
+      ],
+      "pyspark_hint": "df = spark.read.format('cobol').load('s3://bucket/wire/daily/input/seq/'); df.write.format('delta').mode('overwrite').save('s3://bucket/wire/work/input/ksds/')",
+      "decode_confidence": "HIGH",
+      "notes": "1. The REPRO command performs a straightforward sequential-to-VSAM bulk load with no filtering, sorting, or transformation — all records are copied as-is. 2. The KSDS primary key layout (offset, length, format) is not defined in this JCL step; it was established at DEFINE CLUSTER time for WIRE.WORK.INPUT.KSDS and must be retrieved from the IDCAMS DEFINE step or cluster catalogue to fully document key fields. 3. In migration, this step is equivalent to reading the flat file and writing to a keyed store (e.g., Delta Lake, DynamoDB, or a relational table with a primary key). The physical key must be identified from the KSDS cluster definition before implementing the target schema. 4. If the KSDS already contains records, REPRO in this mode will add records; duplicate key conflicts will cause the step to fail with a non-zero return code — migration code must handle upsert or pre-truncation logic accordingly. 5. The DISP=SHR on VSAMOUT means the KSDS is shared; care should be taken in the modern equivalent to handle concurrent write access appropriately. 6. No REPLACE or REUSE parameter is specified, so pre-existing records with duplicate keys will cause errors rather than being overwritten.",
+      "step_name": "STEP020",
+      "utility_type": "IDCAMS",
+      "pgm": "IDCAMS",
+      "sysin_source": "inline",
+      "sysin_dsn": "",
+      "decode_status": "success",
+      "sysin_content": "  REPRO INFILE(SEQIN)      -\n        OUTFILE(VSAMOUT)",
+      "dd_statements": [
+        {
+          "ddname": "SYSPRINT",
+          "parameters": "SYSOUT=*"
+        },
+        {
+          "ddname": "SEQIN",
+          "parameters": "DSN=WIRE.DAILY.INPUT.SEQ,DISP=SHR"
+        },
+        {
+          "ddname": "VSAMOUT",
+          "parameters": "DSN=WIRE.WORK.INPUT.KSDS,DISP=SHR"
+        },
+        {
+          "ddname": "SYSIN",
+          "parameters": "*"
+        }
+      ]
+    },
+    {
+      "business_rule": "This step filters the daily wire transfer input file to extract only those records where the transaction type code is 'PE' (positions 55-56) AND the transaction amount (positions 17-25, packed decimal) is greater than zero — effectively selecting only positive-value PE-type wire transactions. The surviving records are then sorted first by an 8-character key at positions 44-51 ascending (likely an account or routing identifier), then by the packed-decimal amount at positions 17-25 descending (largest amounts first within each account group). The result is written to a new sequential work extract dataset for downstream processing.",
+      "input_files": [
+        "WIRE.DAILY.INPUT.SEQ"
+      ],
+      "output_files": [
+        "WIRE.WORK.EXTRT.SEQ"
+      ],
+      "key_fields": [
+        {
+          "offset": 55,
+          "length": 2,
+          "format": "CH",
+          "meaning": "Transaction type code — only records equal to 'PE' (Payment/Entry type, likely a specific wire payment category such as 'Periodic Entry' or 'Payment Executed') are included"
+        },
+        {
+          "offset": 17,
+          "length": 9,
+          "format": "PD",
+          "meaning": "Transaction amount in packed decimal format — used both as a filter condition (must be greater than zero, excluding zero-value or credit/void transactions) and as the secondary descending sort key (largest amounts ranked first within each group)"
+        },
+        {
+          "offset": 44,
+          "length": 8,
+          "format": "CH",
+          "meaning": "Primary sort key — 8-character alphanumeric field, likely an account number, beneficiary identifier, or routing/reference key; sorted ascending to group related wire transactions together"
+        }
+      ],
+      "operations": [
+        {
+          "type": "FILTER",
+          "description": "Include only records where the 2-byte character field at position 55 equals the literal 'PE' AND the 9-byte packed decimal field at position 17 is greater than zero. Records failing either condition (wrong transaction type, or zero/negative amount) are excluded from the output. Both conditions must be true simultaneously (AND logic)."
+        },
+        {
+          "type": "SORT",
+          "description": "Sort the filtered records by two keys: (1) primary key — 8-byte character field at position 44, ascending order, grouping records by account/reference identifier; (2) secondary key — 9-byte packed decimal field at position 17, descending order, so the largest transaction amounts appear first within each primary key group."
+        },
+        {
+          "type": "EXTRACT",
+          "description": "Write the filtered and sorted records to a new catalogued sequential output dataset (WIRE.WORK.EXTRT.SEQ) with fixed-block 80-byte records, allocated 10 primary cylinders with 5 secondary, for use as a work file in subsequent processing steps."
+        }
+      ],
+      "pyspark_hint": "df_filtered = df.filter((df.transaction_type == 'PE') & (df.amount_pd > 0)); df_sorted = df_filtered.orderBy(df.account_key.asc(), df.amount_pd.desc())",
+      "decode_confidence": "HIGH",
+      "notes": "1. PACKED DECIMAL (PD) interpretation: The 9-byte PD field at offset 17 holds up to 17 significant digits with the last nibble being the sign; in PySpark/Python this must be decoded from raw bytes (e.g., using a UDF or the 'bcd' library) — direct column comparison is not possible without unpacking. 2. The INCLUDE condition uses GT +0 on a signed PD field, meaning strictly positive values only; zero-value and negative-value records are excluded, which is important for migration — ensure the modern equivalent correctly handles signed packed decimal sign nibbles (0xC=positive, 0xD=negative, 0xF=unsigned positive). 3. The record length is 80 bytes (LRECL=80), consistent with a card-image or fixed-format wire transaction record. 4. Offset references are 1-based (DFSORT convention); subtract 1 for 0-based Python/PySpark slicing (e.g., offset 55, length 2 → bytes [54:56]). 5. The external control card member SYS2.CNTL(WIREEXT) should be captured and version-controlled as part of migration — it represents reusable business logic shared potentially across multiple jobs. 6. The 'PE' transaction type code should be confirmed with business stakeholders — common interpretations in wire transfer contexts include 'Periodic Entry', 'Payment Executed', or a SWIFT/Fedwire payment category code. 7. No SUM or REFORMAT operations are present; records are passed through unmodified in content, only filtered and reordered.",
+      "step_name": "STEP030",
+      "utility_type": "DFSORT",
+      "pgm": "SORT",
+      "sysin_source": "external_resolved",
+      "sysin_dsn": "SYS2.CNTL(WIREEXT)",
+      "decode_status": "success",
+      "sysin_content": "  INCLUDE COND=(55,2,CH,EQ,C'PE',AND,17,9,PD,GT,+0)\n  SORT FIELDS=(44,8,CH,A,17,9,PD,D)",
+      "dd_statements": [
+        {
+          "ddname": "SYSPRINT",
+          "parameters": "SYSOUT=*"
+        },
+        {
+          "ddname": "SORTIN",
+          "parameters": "DSN=WIRE.DAILY.INPUT.SEQ,DISP=SHR"
+        },
+        {
+          "ddname": "SORTOUT",
+          "parameters": "DSN=WIRE.WORK.EXTRT.SEQ, DISP=(NEW,CATLG,DELETE), SPACE=(CYL,(10,5)), DCB=(RECFM=FB,LRECL=80,BLKSIZE=0,DSORG=PS)"
+        },
+        {
+          "ddname": "SYSIN",
+          "parameters": "DSN=SYS2.CNTL(WIREEXT),DISP=SHR"
+        }
+      ]
+    },
+    {
+      "business_rule": "This step reads a wire transfer extract file, sorts all records in descending order by transaction amount, then splits the output into two files based on transaction value: high-value wire transfers (amount greater than $1,000,000) are written to HIGHVAL, and low-value wire transfers (amount less than or equal to $1,000,000) are written to LOWVAL. This supports downstream processing that applies different handling, scrutiny, or reporting rules to large versus small wire transactions.",
+      "input_files": [
+        "WIRE.WORK.EXTRT.SEQ"
+      ],
+      "output_files": [
+        "WIRE.WORK.HIGH.SEQ",
+        "WIRE.WORK.LOW.SEQ"
+      ],
+      "key_fields": [
+        {
+          "offset": 17,
+          "length": 9,
+          "format": "PD",
+          "meaning": "Wire transfer transaction amount stored as a packed decimal value (9 bytes = up to 17 significant digits). Used as both the sort key and the threshold split criterion to separate high-value (>$1,000,000) from low-value (<=1,000,000) transactions."
+        }
+      ],
+      "operations": [
+        {
+          "type": "SORT",
+          "description": "Sort all records from WIRE.WORK.EXTRT.SEQ in descending (D) order by the 9-byte packed decimal (PD) transaction amount field at offset 17. Descending order means the largest wire transfer amounts appear first in both output files."
+        },
+        {
+          "type": "SPLIT",
+          "description": "After sorting, split the sorted records into two output datasets using OUTFIL. Records where the packed decimal amount at offset 17, length 9 is greater than +1,000,000 are written to WIRE.WORK.HIGH.SEQ (HIGHVAL). Records where the same amount is less than or equal to +1,000,000 are written to WIRE.WORK.LOW.SEQ (LOWVAL). These two conditions are mutually exclusive and together cover all records, so no records are dropped."
+        },
+        {
+          "type": "FILTER",
+          "description": "HIGHVAL filter: INCLUDE records where position 17, length 9, PD format is GT (greater than) +1000000. LOWVAL filter: INCLUDE records where position 17, length 9, PD format is LE (less than or equal to) +1000000. Together these two filters partition the full sorted dataset without loss."
+        }
+      ],
+      "pyspark_hint": "df_sorted = df.orderBy(col('transaction_amount').desc()); df_sorted.filter(col('transaction_amount') > 1000000).write.save('HIGHVAL'); df_sorted.filter(col('transaction_amount') <= 1000000).write.save('LOWVAL')",
+      "decode_confidence": "HIGH",
+      "notes": "1. FIELD FORMAT — The amount field (offset 17, length 9) is PD (Packed Decimal). In PySpark/Python this must be decoded from raw bytes; it is NOT a standard integer or float. A custom UDF using a library such as 'packdec' or manual nibble-parsing is required if migrating from raw binary source files. 2. OFFSET CONVENTION — DFSORT uses 1-based byte offsets. In Python/PySpark subtract 1 for 0-based slicing: bytes 16 to 25 (exclusive) in Python. 3. COMPLETE PARTITION — The GT/LE split on +1000000 is exhaustive and mutually exclusive, meaning every input record lands in exactly one output file. No records are silently dropped. 4. RECORD LENGTH — Both output files are FB LRECL=200, matching the input structure; no reformatting or field transformation is applied. Records are passed through as-is. 5. SORT THEN SPLIT — DFSORT performs the sort globally across all records first, then the OUTFIL INCLUDE conditions are applied to the sorted stream. Both output files will individually be in descending amount order. 6. OUTPUT SIZING — HIGHVAL and LOWVAL are each allocated 5 primary + 2 secondary cylinders. During migration, validate that target storage (e.g., HDFS, S3, Azure Data Lake) has sufficient capacity and that partition sizing is reviewed against actual data volumes. 7. SIGNED PACKED DECIMAL — PD fields are signed. The positive literal +1000000 implies the amount field carries a sign nibble. Ensure migration tooling correctly handles both positive and negative packed decimal values if negative wire amounts are theoretically possible.",
+      "step_name": "STEP040",
+      "utility_type": "DFSORT",
+      "pgm": "SORT",
+      "sysin_source": "external_resolved",
+      "sysin_dsn": "SYS2.CNTL(WIRESPL)",
+      "decode_status": "success",
+      "sysin_content": "  SORT FIELDS=(17,9,PD,D)\n  OUTFIL FNAMES=HIGHVAL,\n         INCLUDE=(17,9,PD,GT,+1000000)\n  OUTFIL FNAMES=LOWVAL,\n         INCLUDE=(17,9,PD,LE,+1000000)\n",
+      "dd_statements": [
+        {
+          "ddname": "SYSPRINT",
+          "parameters": "SYSOUT=*"
+        },
+        {
+          "ddname": "SORTIN",
+          "parameters": "DSN=WIRE.WORK.EXTRT.SEQ,DISP=SHR"
+        },
+        {
+          "ddname": "HIGHVAL",
+          "parameters": "DSN=WIRE.WORK.HIGH.SEQ, DISP=(NEW,CATLG,DELETE), SPACE=(CYL,(5,2)),RECFM=FB,LRECL=200"
+        },
+        {
+          "ddname": "LOWVAL",
+          "parameters": "DSN=WIRE.WORK.LOW.SEQ, DISP=(NEW,CATLG,DELETE), SPACE=(CYL,(5,2)),RECFM=FB,LRECL=200"
+        },
+        {
+          "ddname": "SYSIN",
+          "parameters": "DSN=SYS2.CNTL(WIRESPL),DISP=SHR"
+        }
+      ]
+    },
+    {
+      "step_name": "STEP050",
+      "utility_type": "IEBGENER",
+      "pgm": "IEBGENER",
+      "sysin_source": "dummy",
+      "sysin_dsn": "",
+      "business_rule": "Straight copy of WIRE.DAILY.INPUT.SEQ to WIRE.DAILY.BACKUP.SEQ. No record transformation applied. Used for backup or audit copy creation.",
+      "input_files": [
+        "WIRE.DAILY.INPUT.SEQ"
+      ],
+      "output_files": [
+        "WIRE.DAILY.BACKUP.SEQ"
+      ],
+      "key_fields": [],
+      "operations": [
+        {
+          "type": "COPY",
+          "description": "Direct record-by-record copy of entire input file to output. SYSIN DD DUMMY means no control cards — all records copied unchanged."
+        }
+      ],
+      "pyspark_hint": "import shutil\nshutil.copy2('WIRE.DAILY.INPUT.SEQ', 'WIRE.DAILY.BACKUP.SEQ')",
+      "decode_confidence": "HIGH",
+      "notes": "IEBGENER with SYSIN DD DUMMY is always a straight copy. Consider ICEGENER (DFSORT-based) for files > 1M records.",
+      "decode_status": "skipped"
+    },
+    {
+      "step_name": "STEP060",
+      "utility_type": "PROGRAM",
+      "pgm": "ACCTPAY",
+      "sysin_source": "none",
+      "sysin_dsn": "",
+      "business_rule": "Non-utility program step. PGM=ACCTPAY is a custom application program (COBOL, Assembler, or PL/I). JUIA does not decode non-utility steps — review source code separately.",
+      "input_files": [],
+      "output_files": [],
+      "key_fields": [],
+      "operations": [
+        {
+          "type": "PROGRAM",
+          "description": "Custom application logic — see program source"
+        }
+      ],
+      "pyspark_hint": "# Requires separate COBOL/program analysis",
+      "decode_confidence": "N/A",
+      "notes": "Non-utility program step",
+      "decode_status": "skipped"
+    },
+    {
+      "business_rule": "This step summarises wire transfer processed records by a 3-character code (bytes 63-65, likely a currency code, wire type, or routing identifier). Records sharing the same sort key are collapsed into a single output record by summing a 9-byte packed decimal amount field (bytes 17-25). The output record is then reformatted to a fixed 200-byte layout containing: the original 16-byte identifier, the 3-byte sort/group key, the summed amount converted to a 12-byte fixed-point signed integer, an 8-byte date or reference field, a 2-byte status or type code, and a 3-byte supplementary code. The net result is a wire transfer summary dataset grouped by the key code with aggregated monetary totals.",
+      "input_files": [
+        "WIRE.PROCESSED.SEQ"
+      ],
+      "output_files": [
+        "WIRE.SUMMARY.SEQ"
+      ],
+      "key_fields": [
+        {
+          "offset": 63,
+          "length": 3,
+          "format": "CH",
+          "meaning": "Primary sort and grouping key — likely a currency code, wire type code, or routing/category identifier used to group wire records for summarisation"
+        },
+        {
+          "offset": 17,
+          "length": 9,
+          "format": "PD",
+          "meaning": "Packed decimal monetary amount field (e.g. wire transfer value) — summed across all records sharing the same sort key to produce an aggregated total"
+        },
+        {
+          "offset": 1,
+          "length": 16,
+          "format": "CH",
+          "meaning": "Leading identifier field carried through to output — likely an account number, transaction reference prefix, or entity identifier"
+        },
+        {
+          "offset": 44,
+          "length": 8,
+          "format": "CH",
+          "meaning": "8-byte field passed through to output unchanged — likely a date (e.g. value date or processing date) or a reference number"
+        },
+        {
+          "offset": 55,
+          "length": 2,
+          "format": "CH",
+          "meaning": "2-byte field passed through to output unchanged — likely a status code, transaction type indicator, or currency flag"
+        },
+        {
+          "offset": 66,
+          "length": 3,
+          "format": "CH",
+          "meaning": "3-byte field passed through to output unchanged — likely a supplementary code, branch code, or secondary category indicator immediately following the sort key"
+        }
+      ],
+      "operations": [
+        {
+          "type": "SORT",
+          "description": "Sort all records from WIRE.PROCESSED.SEQ in ascending order on the 3-byte character field at bytes 63-65 (the grouping key). This orders records so that duplicates on the key are adjacent, enabling the subsequent SUM aggregation."
+        },
+        {
+          "type": "AGGREGATE",
+          "description": "After sorting, collapse all records with the same 3-byte key (bytes 63-65) into a single record by summing the 9-byte packed decimal amount field at bytes 17-25. All duplicate records are deleted; only the single aggregated record per unique key is retained. The summed value replaces the original PD amount in the kept record."
+        },
+        {
+          "type": "REFORMAT",
+          "description": "Reformat each surviving (post-aggregation) record into a new 200-byte fixed layout: bytes 1-16 from original positions 1-16 (16-byte identifier), bytes 17-19 from original positions 63-65 (3-byte group key), bytes 20-31 as the summed amount converted from 9-byte PD to a 12-byte fixed-point signed (FS) integer, bytes 32-39 from original positions 44-51 (8-byte date/reference), bytes 40-41 from original positions 55-56 (2-byte code), bytes 42-44 from original positions 66-68 (3-byte supplementary code). The remaining bytes up to position 200 will be padded or blank-filled by DFSORT to meet the LRECL=200 output record length."
+        }
+      ],
+      "pyspark_hint": "from pyspark.sql import functions as F; df = spark.read(...); df_agg = df.groupBy('key_63_3').agg(F.sum('amount_17_9').alias('sum_amount'), F.first('id_1_16').alias('id_1_16'), F.first('date_44_8').alias('date_44_8'), F.first('code_55_2').alias('code_55_2'), F.first('code2_66_3').alias('code2_66_3')).orderBy('key_63_3'); df_out = df_agg.select('id_1_16', 'key_63_3', 'sum_amount', 'date_44_8', 'code_55_2', 'code2_66_3')",
+      "decode_confidence": "HIGH",
+      "notes": "1. FORMAT CONVERSION: The SUM field at bytes 17-25 is 9-byte Packed Decimal (PD). The OUTREC converts it to FS (Fixed-point Signed) of LENGTH=12. In PySpark/Python this requires careful handling: PD is a signed packed BCD format and must be decoded from raw bytes before summing; standard Spark cannot read PD natively — a UDF or binary unpacking routine (e.g. using the 'struct' module or a custom EBCDIC PD decoder) will be required. 2. OUTPUT RECORD LENGTH: The OUTREC fields sum to 16+3+12+8+2+3 = 44 bytes of defined content within a 200-byte LRECL=FB record. DFSORT will pad the remaining 156 bytes with spaces/zeros. Ensure the target system preserves or explicitly pads to 200 bytes. 3. SUM SEMANTICS: The SUM FIELDS card specifies aggregation on bytes 17-25 (PD). Per DFSORT rules, SORT FIELDS=(63,3,CH,A) defines the grouping key independently; the SUM field is not an additional sort key. All records with identical bytes 63-65 are summed regardless of differing amount values. 4. FIELD GAPS IN OUTPUT: Note that bytes 57-62 and bytes 52-54 of the input are not carried to the output — these fields are intentionally dropped in the summary record, which may represent fields relevant only at transaction level (e.g. individual sequence numbers or timestamps). 5. EBCDIC vs UTF-8: Input data is likely EBCDIC-encoded on the mainframe. CH fields must be transcoded to UTF-8/ASCII during migration. PD fields are binary and must be decoded separately from EBCDIC transcoding pipelines. 6. The output dataset WIRE.SUMMARY.SEQ with RECFM=FB LRECL=200 maps cleanly to a fixed-width flat file or a Parquet/Delta table with explicit column boundaries in a modern platform.",
+      "step_name": "STEP070",
+      "utility_type": "DFSORT",
+      "pgm": "SORT",
+      "sysin_source": "inline",
+      "sysin_dsn": "",
+      "decode_status": "success",
+      "sysin_content": "  SORT FIELDS=(63,3,CH,A)\n  SUM FIELDS=(17,9,PD)\n  OUTREC FIELDS=(1,16,\n                 63,3,\n                 17,9,PD,TO=FS,LENGTH=12,\n                 44,8,\n                 55,2,\n                 66,3)",
+      "dd_statements": [
+        {
+          "ddname": "SYSPRINT",
+          "parameters": "SYSOUT=*"
+        },
+        {
+          "ddname": "SORTIN",
+          "parameters": "DSN=WIRE.PROCESSED.SEQ,DISP=SHR"
+        },
+        {
+          "ddname": "SORTOUT",
+          "parameters": "DSN=WIRE.SUMMARY.SEQ, DISP=(NEW,CATLG,DELETE), SPACE=(CYL,(5,2)),RECFM=FB,LRECL=200"
+        },
+        {
+          "ddname": "SYSIN",
+          "parameters": "*"
+        }
+      ]
+    },
+    {
+      "step_name": "STEP080",
+      "utility_type": "IEBGENER",
+      "pgm": "IEBGENER",
+      "sysin_source": "dummy",
+      "sysin_dsn": "",
+      "business_rule": "Straight copy of WIRE.PROCESSED.SEQ to WIRE.AUDIT.SEQ. No record transformation applied. Used for backup or audit copy creation.",
+      "input_files": [
+        "WIRE.PROCESSED.SEQ"
+      ],
+      "output_files": [
+        "WIRE.AUDIT.SEQ"
+      ],
+      "key_fields": [],
+      "operations": [
+        {
+          "type": "COPY",
+          "description": "Direct record-by-record copy of entire input file to output. SYSIN DD DUMMY means no control cards — all records copied unchanged."
+        }
+      ],
+      "pyspark_hint": "import shutil\nshutil.copy2('WIRE.PROCESSED.SEQ', 'WIRE.AUDIT.SEQ')",
+      "decode_confidence": "HIGH",
+      "notes": "IEBGENER with SYSIN DD DUMMY is always a straight copy. Consider ICEGENER (DFSORT-based) for files > 1M records.",
+      "decode_status": "skipped"
+    },
+    {
+      "business_rule": "This step uses IDCAMS LISTCAT to catalogue and report on two VSAM KSDS (Key-Sequenced Data Set) datasets: WIRE.WORK.INPUT.KSDS and WIRE.WORK.EXTRT.KSDS. The ALL parameter requests the full catalogue listing for each dataset, including allocation details, statistics (records inserted, deleted, retrieved, updated), space utilisation, volume information, key ranges, and expiration attributes. The business purpose is diagnostic and auditing in nature — it is commonly used to verify that these wire processing work datasets exist in the system catalogue, to capture their current statistics (e.g. record counts, high-used RBA, free space) for job run documentation, to confirm correct allocation prior to or following processing steps, and to provide a catalogue snapshot for troubleshooting or compliance purposes within a wire transfer processing workflow.",
+      "input_files": [],
+      "output_files": [],
+      "key_fields": [],
+      "operations": [
+        {
+          "type": "EXTRACT",
+          "description": "LISTCAT ENTRIES(WIRE.WORK.INPUT.KSDS) ALL — queries the ICF (Integrated Catalog Facility) system catalogue and extracts the full catalogue entry for the VSAM KSDS dataset WIRE.WORK.INPUT.KSDS. The ALL parameter causes output of every available attribute group: HISTORY (creation/expiration dates, owner), VOLUME (VOLSER, device type, extents, HI-A-RBA, HI-U-RBA, physical record size), ALLOCATION (primary/secondary space, space type), STATISTICS (records inserted/deleted/retrieved/updated, CI splits, CA splits, free CI/CA percentages, record count, REC-RETRIEVED), and DATA/INDEX component details including key length, key offset, maximum record length, CI size, and FREESPACE settings."
+        },
+        {
+          "type": "EXTRACT",
+          "description": "LISTCAT ENTRIES(WIRE.WORK.EXTRT.KSDS) ALL — queries the ICF system catalogue and extracts the full catalogue entry for the VSAM KSDS dataset WIRE.WORK.EXTRT.KSDS (likely an extract or extraction work file in the wire transfer process). As with the first LISTCAT, ALL attributes are reported including statistics, volume placement, key structure, and space utilisation, enabling comparison or verification of this downstream extract dataset."
+        }
+      ],
+      "pyspark_hint": "# No PySpark equivalent — LISTCAT is a catalogue metadata query with no data record processing. Python equivalent: import subprocess; result = subprocess.run(['tsocmd', 'LISTCAT ENTRIES(WIRE.WORK.INPUT.KSDS) ALL'], capture_output=True) — or query a modern data catalogue API (e.g. AWS Glue Data Catalog, Apache Atlas) for dataset metadata.",
+      "decode_confidence": "HIGH",
+      "notes": "1. LISTCAT produces no output datasets and reads no data records — it solely interrogates the VSAM system catalogue (SYSPRINT/SYSOUT captures the report). There are no input_files or output_files in the data-movement sense. 2. Both datasets are KSDS type, confirming they are key-sequenced and support random access by key — relevant when migrating to a modern platform where the equivalent would be a partitioned table with a primary key or an indexed store. 3. The dataset naming convention (WIRE.WORK.INPUT.KSDS and WIRE.WORK.EXTRT.KSDS) strongly implies these are transient working datasets within a wire transfer processing job stream — INPUT holds incoming wire records and EXTRT holds extracted/filtered records for downstream processing. 4. In a modern migration, this step should be replaced with equivalent data catalogue metadata checks or data quality validation steps (e.g. checking row counts, schema existence, partition metadata) against the target platform. 5. LISTCAT condition code 0 confirms both datasets exist and are accessible; a non-zero return code would indicate a missing or inaccessible dataset, which may be used implicitly by subsequent IF-THEN-ELSE logic in the broader JCL job. Ensure this error-detection behaviour is preserved in the migrated pipeline. 6. The ALL parameter output is voluminous — if this step exists purely for diagnostic logging, it may be safely omitted in production migrations or replaced with a lightweight metadata existence check.",
+      "step_name": "STEP090",
+      "utility_type": "IDCAMS",
+      "pgm": "IDCAMS",
+      "sysin_source": "inline",
+      "sysin_dsn": "",
+      "decode_status": "success",
+      "sysin_content": "  LISTCAT ENTRIES(WIRE.WORK.INPUT.KSDS)  ALL\n  LISTCAT ENTRIES(WIRE.WORK.EXTRT.KSDS)  ALL",
+      "dd_statements": [
+        {
+          "ddname": "SYSPRINT",
+          "parameters": "SYSOUT=*"
+        },
+        {
+          "ddname": "SYSIN",
+          "parameters": "*"
+        }
+      ]
+    }
+  ]
+}

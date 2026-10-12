@@ -1,0 +1,69 @@
+---
+title: "MYTEST — Data Lineage"
+---
+graph LR
+
+    %% Colour coding by utility type
+    classDef dfsort fill:#27ae60,stroke:#1e8449,color:#ffffff
+    classDef icetool fill:#2ecc71,stroke:#27ae60,color:#ffffff
+    classDef idcams fill:#2980b9,stroke:#1a6fa3,color:#ffffff
+    classDef iebgener fill:#e67e22,stroke:#ca6f1e,color:#ffffff
+    classDef iebcopy fill:#e74c3c,stroke:#c0392b,color:#ffffff
+    classDef program fill:#95a5a6,stroke:#717d7e,color:#ffffff
+    classDef dataset fill:#f8f9fa,stroke:#6c757d,color:#212529
+
+    %% Dataset nodes (cylinders)
+    DS_WIRE_AUDIT_SEQ[("WIRE.AUDIT.SEQ")]
+    DS_WIRE_DAILY_BACKUP_SEQ[("WIRE.DAILY.BACKUP.SEQ")]
+    DS_WIRE_DAILY_INPUT_SEQ[("WIRE.DAILY.INPUT.SEQ")]
+    DS_WIRE_PARMLIBWIRECNTL[("WIRE.PARMLIB(WIRECNTL)")]
+    DS_WIRE_PROCESSED_SEQ[("WIRE.PROCESSED.SEQ")]
+    DS_WIRE_SUMMARY_SEQ[("WIRE.SUMMARY.SEQ")]
+    DS_WIRE_WORK_EXTRT_KSDS[("WIRE.WORK.EXTRT.KSDS")]
+    DS_WIRE_WORK_EXTRT_SEQ[("WIRE.WORK.EXTRT.SEQ")]
+    DS_WIRE_WORK_HIGH_SEQ[("WIRE.WORK.HIGH.SEQ")]
+    DS_WIRE_WORK_INPUT_KSDS[("WIRE.WORK.INPUT.KSDS")]
+    DS_WIRE_WORK_LOW_SEQ[("WIRE.WORK.LOW.SEQ")]
+
+    %% Step nodes (rectangles)
+    STEP010["STEP010<br/>IDCAMS"]
+    STEP020["STEP020<br/>IDCAMS"]
+    STEP030["STEP030<br/>DFSORT"]
+    STEP040["STEP040<br/>DFSORT"]
+    STEP050["STEP050<br/>IEBGENER"]
+    STEP060["STEP060<br/>ACCTPAY"]
+    STEP070["STEP070<br/>DFSORT"]
+    STEP080["STEP080<br/>IEBGENER"]
+    STEP090["STEP090<br/>IDCAMS"]
+
+    %% Data flow edges
+    STEP010 --> DS_WIRE_WORK_INPUT_KSDS
+    STEP010 --> DS_WIRE_WORK_EXTRT_KSDS
+    DS_WIRE_DAILY_INPUT_SEQ --> STEP020
+    STEP020 --> DS_WIRE_WORK_INPUT_KSDS
+    DS_WIRE_DAILY_INPUT_SEQ --> STEP030
+    STEP030 --> DS_WIRE_WORK_EXTRT_SEQ
+    DS_WIRE_WORK_EXTRT_SEQ --> STEP040
+    STEP040 --> DS_WIRE_WORK_HIGH_SEQ
+    STEP040 --> DS_WIRE_WORK_LOW_SEQ
+    DS_WIRE_DAILY_INPUT_SEQ --> STEP050
+    STEP050 --> DS_WIRE_DAILY_BACKUP_SEQ
+    DS_WIRE_WORK_HIGH_SEQ --> STEP060
+    DS_WIRE_PARMLIBWIRECNTL --> STEP060
+    STEP060 --> DS_WIRE_PROCESSED_SEQ
+    DS_WIRE_PROCESSED_SEQ --> STEP070
+    STEP070 --> DS_WIRE_SUMMARY_SEQ
+    DS_WIRE_PROCESSED_SEQ --> STEP080
+    STEP080 --> DS_WIRE_AUDIT_SEQ
+
+    %% Apply colour classes
+    class DS_WIRE_WORK_INPUT_KSDS,DS_WIRE_WORK_EXTRT_KSDS,DS_WIRE_DAILY_INPUT_SEQ,DS_WIRE_WORK_EXTRT_SEQ,DS_WIRE_WORK_HIGH_SEQ,DS_WIRE_WORK_LOW_SEQ,DS_WIRE_DAILY_BACKUP_SEQ,DS_WIRE_PARMLIBWIRECNTL,DS_WIRE_PROCESSED_SEQ,DS_WIRE_SUMMARY_SEQ,DS_WIRE_AUDIT_SEQ dataset
+    class STEP010 idcams
+    class STEP020 idcams
+    class STEP030 dfsort
+    class STEP040 dfsort
+    class STEP050 iebgener
+    class STEP060 program
+    class STEP070 dfsort
+    class STEP080 iebgener
+    class STEP090 idcams

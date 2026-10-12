@@ -26,3 +26,6 @@ outputs/pyspark/backups/
 # Legacy backups from runs made before correction backups were removed.
 # Run JSON, PySpark, diagrams, specs, and sessions.db are tracked.
 outputs/*/*/pyspark/backups/
+
+# Session DB
+outputs/sessions.db
