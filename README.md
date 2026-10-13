@@ -31,7 +31,7 @@ JUIA reads a JCL job, attempts to decode supported utility steps, and produces:
 | Embeddings | `sentence-transformers` — `all-MiniLM-L6-v2` (local CPU) |
 | PDF Processing | `pypdf` |
 | Session Memory | SQLite (built into Python) |
-| API Framework | FastAPI planned for Phase 8; not installed yet |
+| API Framework | FastAPI + local HTML/CSS/JavaScript interface |
 | Language | Python 3.x |
 | Environment | Windows PowerShell or Linux/Codespaces, venv |
 
@@ -49,6 +49,8 @@ juia/
 │   ├── validator/
 │   ├── memory/
 │   └── output/
+├── web/                          # Phase 8 FastAPI server and static interface
+├── docs/                         # Front end design
 ├── scripts/                      # Corpus tools, legacy phase drivers,
 │   ├── run_all_jcl.sh            # and sequential batch wrappers
 │   └── run_all_jcl.ps1
@@ -68,7 +70,7 @@ juia/
 └── README.md
 ```
 
-The front end has not been created. A backend installation needs `agent/`,
+The local front end runs through `web.app`. A backend installation needs `agent/`,
 `requirements.txt`, the input JCL and CNTL files, an ingested local
 `corpus/vectordb/`, a writable output directory, and `ANTHROPIC_API_KEY` in the
 runtime environment. Generated PySpark requires a separately configured Spark
@@ -117,10 +119,13 @@ sentence-transformers
 langchain
 langchain-community
 anthropic
+fastapi
+uvicorn
+python-multipart
+httpx
 ```
 
-FastAPI and Uvicorn are planned for the frontend phase and are not yet in
-`requirements.txt`.
+`httpx` supports the web route tests.
 
 ---
 
@@ -186,6 +191,28 @@ populated, and `ANTHROPIC_API_KEY` available in the environment:
 ```bash
 python -m agent.main jcl/TEST.jcl --cntl-folder cntl --output-folder outputs
 ```
+
+### Local web interface
+
+Start the server from the project root:
+
+```bash
+python -m uvicorn web.app:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000/`. Choose one `.jcl` job and optionally attach
+external CNTL members (`.jcl`, `.txt`, or `.cntl`). If no CNTL files are
+attached, the server uses the local `cntl/` folder. The interface shows recent
+runs, accepts a saved run ID, and exposes each run's steps, validation details,
+lineage flow, and artifacts. Viewing saved runs does not require an API key or
+vector database; creating a new conversion requires both. The server runs one
+conversion at a time and shows queued/running state without claiming per-step
+progress. Its live task state is in memory, while completed run results remain
+in `outputs/`.
+
+The design and route contract are in `docs/phase8-frontend-design.md`. The
+interface is intended for local use; bind to `127.0.0.1` unless a separate
+deployment adds access controls.
 
 Each invocation writes to `outputs/<job_name>/<run_id>/`, including generated
 PySpark files, decoded and validation JSON, a Mermaid diagram, and a migration
@@ -310,7 +337,7 @@ Phase 4  Generator  (PySpark code generation)                  IMPLEMENTED
 Phase 5  Validator  (Claude review + self-correction)          IMPLEMENTED
 Phase 6  Output     (md_writer + Mermaid diagram)              IMPLEMENTED
 Phase 7  Orchestrator (main.py + SQLite session memory)        IMPLEMENTED
-Phase 8  Frontend   (FastAPI + HTML interface)                 NOT STARTED
+Phase 8  Frontend   (FastAPI + HTML interface)                 IMPLEMENTED
 ```
 
 The integrated backend has automated tests with mocked API calls. Live runs
